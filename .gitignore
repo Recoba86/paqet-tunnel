@@ -1,0 +1,21 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Binaries
+paqet
+paqet_*
+
+# Config files with secrets
+config.yaml
+*.key
+
+# Logs
+*.log
+.temp*
