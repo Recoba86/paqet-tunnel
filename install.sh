@@ -445,7 +445,7 @@ read_forward_mappings() {
         if [ "$default_protocol" = "udp" ]; then
             echo -e "${CYAN}Format:${NC} 51820 (same UDP), 1090:443, or 1090:443/udp"
         else
-            echo -e "${CYAN}Format:${NC} 443 (same TCP), 8443:443, or 8443:443/tcp"
+            echo -e "${CYAN}Format:${NC} 443 (same TCP), 8443:443, 8443:443/tcp, or append /udp for UDP"
         fi
         read -p "> " value < /dev/tty
 
@@ -2640,21 +2640,46 @@ remove_forward_port() {
         mapping_to_remove="$normalized_remove"
     fi
     
-    # Verify exact mapping exists
+    # Verify exact mapping exists, or resolve shorthand if uniquely identifiable.
     if ! echo "$current_mappings_list" | grep -Fxq "$mapping_to_remove"; then
-        # Fallback: if user entered just a port and both tcp+udp exist, explain ambiguity
-        if [[ "$mapping_to_remove" =~ ^[0-9]+$ ]]; then
-            local same_port_count
-            same_port_count=$(echo "$current_mappings_list" | while read spec; do
-                [ -n "$spec" ] && [ "$(mapping_listen_port "$spec")" = "$mapping_to_remove" ] && echo x
-            done | wc -l)
-            if [ "$same_port_count" -gt 1 ]; then
-                print_error "Port $mapping_to_remove exists on multiple protocols. Use exact mapping (e.g. $mapping_to_remove or ${mapping_to_remove}/udp)."
+        local shorthand_mode=""
+        local shorthand_listen=""
+        local shorthand_proto=""
+
+        if [[ "$remove_input" =~ ^[0-9]+$ ]]; then
+            shorthand_mode="listen_only"
+            shorthand_listen="$remove_input"
+        elif [[ "$remove_input" =~ ^([0-9]+)/(tcp|udp)$ ]]; then
+            shorthand_mode="listen_proto"
+            shorthand_listen="${BASH_REMATCH[1]}"
+            shorthand_proto="${BASH_REMATCH[2]}"
+        fi
+
+        if [ -n "$shorthand_mode" ]; then
+            local matches=()
+            local spec=""
+            while read spec; do
+                [ -z "$spec" ] && continue
+                if [ "$shorthand_mode" = "listen_only" ]; then
+                    [ "$(mapping_listen_port "$spec")" = "$shorthand_listen" ] && matches+=("$spec")
+                else
+                    [ "$(mapping_listen_port "$spec")" = "$shorthand_listen" ] && [ "$(mapping_protocol "$spec")" = "$shorthand_proto" ] && matches+=("$spec")
+                fi
+            done <<< "$current_mappings_list"
+
+            if [ "${#matches[@]}" -eq 1 ]; then
+                mapping_to_remove="${matches[0]}"
+            elif [ "${#matches[@]}" -gt 1 ]; then
+                print_error "Multiple mappings match '$remove_input'. Use exact mapping (e.g. ${matches[0]})."
+                return 1
+            else
+                print_error "Mapping '$remove_input' is not in the current configuration"
                 return 1
             fi
+        else
+            print_error "Mapping '$mapping_to_remove' is not in the current configuration"
+            return 1
         fi
-        print_error "Mapping '$mapping_to_remove' is not in the current configuration"
-        return 1
     fi
     
     # Build new mapping list without the removed exact mapping
@@ -2710,11 +2735,11 @@ replace_all_forward_ports() {
         key="${proto}:${listen_port}"
         if ! echo " $current_keys " | grep -qw "$key"; then
             if ! check_port_conflict_proto "$listen_port" "$proto"; then
-            echo -e "${YELLOW}Include anyway? (y/n)${NC}"
-            read -p "> " include_anyway < /dev/tty
-            if [[ ! "$include_anyway" =~ ^[Yy]$ ]]; then
-                continue
-            fi
+                echo -e "${YELLOW}Include anyway? (y/n)${NC}"
+                read -p "> " include_anyway < /dev/tty
+                if [[ ! "$include_anyway" =~ ^[Yy]$ ]]; then
+                    continue
+                fi
             fi
         fi
         mappings_str="${mappings_str}${mappings_str:+,}${spec}"
@@ -2747,7 +2772,10 @@ rebuild_forward_config() {
     fi
     
     local forward_config=""
-    build_forward_config_from_mappings_csv "$mappings_csv" forward_config
+    if ! build_forward_config_from_mappings_csv "$mappings_csv" forward_config; then
+        print_error "Failed to build forward configuration"
+        return 1
+    fi
     
     # Use awk to replace the forward section
     awk -v new_forward="forward:${forward_config}" '
