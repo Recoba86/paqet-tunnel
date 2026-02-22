@@ -346,14 +346,18 @@ read_ports() {
 
 # Parse and validate forward mapping list (Server A)
 # Supports:
-#   443            -> listen 443, target 443
-#   8443:443       -> listen 8443, target 443
-#   443,8443:443   -> mixed entries
+#   443                -> listen 443, target 443, tcp
+#   8443:443           -> listen 8443, target 443, tcp
+#   51820/udp          -> listen 51820, target 51820, udp
+#   1090:443/tcp       -> listen 1090, target 443, tcp
+#   1090:443/udp       -> listen 1090, target 443, udp
+#   443,51820/udp      -> mixed entries
 # Returns normalized CSV (duplicates removed by validation):
-#   443,8443:443
+#   443,51820/udp,8443:443/udp
 normalize_forward_mappings_input() {
     local raw_input="$1"
     local varname="$2"
+    local default_protocol="${3:-tcp}"
     local normalized_input=""
 
     # Accept commas and/or spaces as separators
@@ -365,7 +369,7 @@ normalize_forward_mappings_input() {
     fi
 
     local normalized=""
-    local seen_listens=""
+    local seen_keys=""
     local item=""
 
     IFS=',' read -ra items <<< "$normalized_input"
@@ -375,6 +379,13 @@ normalize_forward_mappings_input() {
 
         local listen_port=""
         local target_port=""
+        local protocol="$default_protocol"
+
+        # Optional protocol suffix (/tcp or /udp)
+        if [[ "$item" =~ ^(.+)/(tcp|udp)$ ]]; then
+            item="${BASH_REMATCH[1]}"
+            protocol="${BASH_REMATCH[2]}"
+        fi
 
         if [[ "$item" =~ ^([0-9]+):([0-9]+)$ ]]; then
             listen_port="${BASH_REMATCH[1]}"
@@ -383,7 +394,7 @@ normalize_forward_mappings_input() {
             listen_port="$item"
             target_port="$item"
         else
-            print_error "Invalid mapping: $item (use PORT or LISTEN:TARGET, e.g. 443 or 8443:443)"
+            print_error "Invalid mapping: $item (use PORT or LISTEN:TARGET, optionally /tcp or /udp)"
             return 1
         fi
 
@@ -396,14 +407,16 @@ normalize_forward_mappings_input() {
             return 1
         fi
 
-        if echo " $seen_listens " | grep -qw "$listen_port"; then
-            print_error "Duplicate listen port: $listen_port (each listen port can appear only once)"
+        local seen_key="${protocol}:${listen_port}"
+        if echo " $seen_keys " | grep -qw "$seen_key"; then
+            print_error "Duplicate listen/protocol pair: ${listen_port}/${protocol}"
             return 1
         fi
-        seen_listens="${seen_listens} ${listen_port}"
+        seen_keys="${seen_keys} ${seen_key}"
 
         local spec="$listen_port"
         [ "$listen_port" != "$target_port" ] && spec="${listen_port}:${target_port}"
+        [ "$protocol" = "udp" ] && spec="${spec}/udp"
         normalized="${normalized:+$normalized,}$spec"
     done
 
@@ -420,6 +433,7 @@ read_forward_mappings() {
     local prompt="$1"
     local varname="$2"
     local default="$3"
+    local default_protocol="${4:-tcp}"
     local value=""
 
     while true; do
@@ -428,7 +442,11 @@ read_forward_mappings() {
         else
             echo -e "${YELLOW}${prompt}:${NC}"
         fi
-        echo -e "${CYAN}Format:${NC} 443 (same) or 8443:443 (Iran:ServerB local)"
+        if [ "$default_protocol" = "udp" ]; then
+            echo -e "${CYAN}Format:${NC} 51820 (same UDP), 1090:443, or 1090:443/udp"
+        else
+            echo -e "${CYAN}Format:${NC} 443 (same TCP), 8443:443, or 8443:443/tcp"
+        fi
         read -p "> " value < /dev/tty
 
         if [ -z "$value" ] && [ -n "$default" ]; then
@@ -436,7 +454,7 @@ read_forward_mappings() {
         fi
 
         local normalized=""
-        if normalize_forward_mappings_input "$value" normalized; then
+        if normalize_forward_mappings_input "$value" normalized "$default_protocol"; then
             eval "$varname='$normalized'"
             return 0
         fi
@@ -446,15 +464,26 @@ read_forward_mappings() {
 
 mapping_listen_port() {
     local spec="$1"
+    spec="${spec%%/*}"
     echo "${spec%%:*}"
 }
 
 mapping_target_port() {
     local spec="$1"
+    spec="${spec%%/*}"
     if [[ "$spec" == *:* ]]; then
         echo "${spec##*:}"
     else
         echo "${spec%%:*}"
+    fi
+}
+
+mapping_protocol() {
+    local spec="$1"
+    if [[ "$spec" == */udp ]]; then
+        echo "udp"
+    else
+        echo "tcp"
     fi
 }
 
@@ -471,13 +500,15 @@ build_forward_config_from_mappings_csv() {
 
         local listen_port
         local target_port
+        local protocol
         listen_port=$(mapping_listen_port "$spec")
         target_port=$(mapping_target_port "$spec")
+        protocol=$(mapping_protocol "$spec")
 
         rendered_forward_config="${rendered_forward_config}
   - listen: \"0.0.0.0:${listen_port}\"
     target: \"127.0.0.1:${target_port}\"
-    protocol: \"tcp\""
+    protocol: \"${protocol}\""
     done
 
     if [ -z "$rendered_forward_config" ]; then
@@ -887,6 +918,27 @@ check_port_conflict() {
             fi
         fi
     fi
+}
+
+check_port_conflict_proto() {
+    local port=$1
+    local proto="${2:-tcp}"
+
+    local ss_args="-tln"
+    [ "$proto" = "udp" ] && ss_args="-uln"
+
+    if ss $ss_args 2>/dev/null | grep -q ":${port} "; then
+        print_warning "Port $port/$proto is already in use!"
+        local pid=""
+        pid=$(lsof -t -i${proto}:$port 2>/dev/null | head -1)
+        if [ -n "$pid" ]; then
+            local pname=$(ps -p $pid -o comm= 2>/dev/null)
+            echo -e "  Process: ${CYAN}$pname${NC} (PID: $pid)"
+        fi
+        print_error "Please free the port or choose another."
+        return 1
+    fi
+    return 0
 }
 
 #===============================================================================
@@ -1698,8 +1750,41 @@ setup_server_a() {
     # Ports/mappings to forward (with validation)
     echo ""
     echo -e "${CYAN}These will be accessible on this server and forwarded to Server B${NC}"
-    echo -e "${CYAN}Use same port:${NC} ${YELLOW}443${NC}   ${CYAN}or map different port:${NC} ${YELLOW}8443:443${NC}"
-    read_forward_mappings "Enter forward ports/mappings (comma-separated)" FORWARD_MAPPINGS "$DEFAULT_FORWARD_PORTS"
+    echo -e "${YELLOW}Forward protocol mode:${NC}"
+    echo -e "  ${CYAN}1)${NC} TCP only (VLESS/V2Ray TCP)"
+    echo -e "  ${CYAN}2)${NC} UDP only (WireGuard/Hysteria)"
+    echo -e "  ${CYAN}3)${NC} Both TCP and UDP"
+    read -p "Select [1]: " FORWARD_MODE_CHOICE < /dev/tty
+    FORWARD_MODE_CHOICE=${FORWARD_MODE_CHOICE:-1}
+
+    local FORWARD_MAPPINGS=""
+    local FORWARD_TCP_MAPPINGS=""
+    local FORWARD_UDP_MAPPINGS=""
+
+    case "$FORWARD_MODE_CHOICE" in
+        1)
+            echo -e "${CYAN}Use same TCP port:${NC} ${YELLOW}443${NC}   ${CYAN}or map different TCP port:${NC} ${YELLOW}8443:443${NC}"
+            read_forward_mappings "Enter TCP forward ports/mappings (comma-separated)" FORWARD_TCP_MAPPINGS "$DEFAULT_FORWARD_PORTS" "tcp"
+            FORWARD_MAPPINGS="$FORWARD_TCP_MAPPINGS"
+            ;;
+        2)
+            echo -e "${CYAN}Use same UDP port:${NC} ${YELLOW}51820${NC}   ${CYAN}or map different UDP port:${NC} ${YELLOW}1090:443/udp${NC}"
+            read_forward_mappings "Enter UDP forward ports/mappings (comma-separated)" FORWARD_UDP_MAPPINGS "" "udp"
+            FORWARD_MAPPINGS="$FORWARD_UDP_MAPPINGS"
+            ;;
+        3)
+            echo -e "${CYAN}TCP mappings (examples):${NC} ${YELLOW}443${NC}, ${YELLOW}8443:443${NC}"
+            read_forward_mappings "Enter TCP forward ports/mappings (comma-separated)" FORWARD_TCP_MAPPINGS "$DEFAULT_FORWARD_PORTS" "tcp"
+            echo ""
+            echo -e "${CYAN}UDP mappings (examples):${NC} ${YELLOW}51820/udp${NC}, ${YELLOW}1090:443/udp${NC}"
+            read_forward_mappings "Enter UDP forward ports/mappings (comma-separated)" FORWARD_UDP_MAPPINGS "" "udp"
+            FORWARD_MAPPINGS="${FORWARD_TCP_MAPPINGS},${FORWARD_UDP_MAPPINGS}"
+            ;;
+        *)
+            print_error "Invalid selection"
+            return 1
+            ;;
+    esac
     
     # Check port conflicts
     echo ""
@@ -1707,8 +1792,10 @@ setup_server_a() {
     for spec in "${MAPPING_SPECS[@]}"; do
         spec=$(echo "$spec" | tr -d ' ')
         local listen_port
+        local listen_proto
         listen_port=$(mapping_listen_port "$spec")
-        check_port_conflict "$listen_port" || return 0
+        listen_proto=$(mapping_protocol "$spec")
+        check_port_conflict_proto "$listen_port" "$listen_proto" || return 0
     done
 
     # PaqX-style automatic profile (CPU/RAM-aware)
@@ -1804,25 +1891,36 @@ EOF
     echo -e "${YELLOW}Client Connection:${NC}"
     echo -e "  Clients should connect to: ${CYAN}$advertised_host${NC}"
     local listen_ports_summary=""
+    local listen_ports_summary_tcp=""
+    local listen_ports_summary_udp=""
     for spec in "${MAPPING_SPECS[@]}"; do
         spec=$(echo "$spec" | tr -d ' ')
         local lp
+        local proto
         lp=$(mapping_listen_port "$spec")
-        listen_ports_summary="${listen_ports_summary}${listen_ports_summary:+,}${lp}"
+        proto=$(mapping_protocol "$spec")
+        listen_ports_summary="${listen_ports_summary}${listen_ports_summary:+,}${lp}/${proto}"
+        if [ "$proto" = "udp" ]; then
+            listen_ports_summary_udp="${listen_ports_summary_udp}${listen_ports_summary_udp:+,}${lp}"
+        else
+            listen_ports_summary_tcp="${listen_ports_summary_tcp}${listen_ports_summary_tcp:+,}${lp}"
+        fi
     done
     echo -e "  On ports: ${CYAN}$listen_ports_summary${NC}"
+    [ -n "$listen_ports_summary_tcp" ] && echo -e "  TCP ports: ${CYAN}$listen_ports_summary_tcp${NC}"
+    [ -n "$listen_ports_summary_udp" ] && echo -e "  UDP ports: ${CYAN}$listen_ports_summary_udp${NC}"
     if [ "$advertised_host" != "$public_ip" ]; then
         echo -e "  ${YELLOW}(Detected local IP was:${NC} ${CYAN}$public_ip${NC}${YELLOW})${NC}"
     fi
     echo ""
-    echo -e "${YELLOW}Example V2Ray config update:${NC}"
+    echo -e "${YELLOW}Example endpoint updates:${NC}"
     for spec in "${MAPPING_SPECS[@]}"; do
         spec=$(echo "$spec" | tr -d ' ')
-        local listen_port target_port
+        local listen_port target_port proto
         listen_port=$(mapping_listen_port "$spec")
         target_port=$(mapping_target_port "$spec")
-        echo -e "  Change: ${RED}vless://...@${SERVER_B_IP}:${target_port}${NC}"
-        echo -e "  To:     ${GREEN}vless://...@${advertised_host}:${listen_port}${NC}"
+        proto=$(mapping_protocol "$spec")
+        echo -e "  ${CYAN}[${proto}]${NC} ${RED}${SERVER_B_IP}:${target_port}${NC}  ->  ${GREEN}${advertised_host}:${listen_port}${NC}"
     done
     echo ""
     echo -e "${YELLOW}Commands:${NC}"
@@ -2169,6 +2267,12 @@ edit_ports() {
         
         print_success "Port updated to $NEW_PORT"
     else
+        if has_udp_forward_entries; then
+            print_warning "UDP forward entries detected in this config."
+            print_info "Use 'Manual edit config file (advanced)' for forward rules in mixed TCP/UDP setups."
+            return 1
+        fi
+
         echo -e "${CYAN}Current forward configuration:${NC}"
         grep -A3 "^forward:" "$PAQET_CONFIG" | head -10
         echo ""
@@ -2228,13 +2332,20 @@ port_settings_menu() {
         else
             local server_addr=$(grep -A1 "^server:" "$PAQET_CONFIG" | grep "addr:" | awk '{print $2}' | tr -d '"')
             local server_port=$(echo "$server_addr" | cut -d':' -f2)
+            local udp_present=false
+            has_udp_forward_entries && udp_present=true
             echo -e "  Server B paqet port: ${CYAN}$server_port${NC}"
             echo ""
-            echo -e "  ${YELLOW}V2Ray Forward Mappings (Iran -> Server B local):${NC}"
+            echo -e "  ${YELLOW}Forward Mappings (Iran -> Server B local):${NC}"
             get_current_forward_mappings | while read spec; do
                 [ -z "$spec" ] && continue
                 echo -e "    - ${CYAN}$spec${NC}"
             done
+            if [ "$udp_present" = true ]; then
+                echo ""
+                print_warning "UDP/mixed forwarding detected: Port add/remove/replace menu currently supports TCP-only edits."
+                print_info "Use 'Edit Configuration -> 6) Manual edit config file (advanced)' for UDP/mixed changes."
+            fi
         fi
         
         echo ""
@@ -2264,21 +2375,33 @@ port_settings_menu() {
                 ;;
             2) 
                 if [ "$role" = "client" ]; then
-                    add_forward_ports
+                    if has_udp_forward_entries; then
+                        print_error "UDP/mixed forward mappings detected. Use Manual edit config file (advanced)."
+                    else
+                        add_forward_ports
+                    fi
                 else
                     print_error "Invalid choice"
                 fi
                 ;;
             3) 
                 if [ "$role" = "client" ]; then
-                    remove_forward_port
+                    if has_udp_forward_entries; then
+                        print_error "UDP/mixed forward mappings detected. Use Manual edit config file (advanced)."
+                    else
+                        remove_forward_port
+                    fi
                 else
                     print_error "Invalid choice"
                 fi
                 ;;
             4) 
                 if [ "$role" = "client" ]; then
-                    replace_all_forward_ports
+                    if has_udp_forward_entries; then
+                        print_error "UDP/mixed forward mappings detected. Use Manual edit config file (advanced)."
+                    else
+                        replace_all_forward_ports
+                    fi
                 else
                     print_error "Invalid choice"
                 fi
@@ -2303,6 +2426,8 @@ get_current_forward_ports() {
 # Outputs one item per line:
 #   443
 #   8443:443
+#   51820/udp
+#   1090:443/udp
 get_current_forward_mappings() {
     awk '
         /^forward:/ { in_forward=1; next }
@@ -2318,14 +2443,27 @@ get_current_forward_mappings() {
             sub(/^.*:/, "", line)
             sub(/".*$/, "", line)
             target=line
+        }
+        in_forward && /protocol:/ {
+            line=$0
+            sub(/^.*"/, "", line)
+            sub(/".*$/, "", line)
+            proto=line
             if (listen != "") {
-                if (target == "" || target == listen) print listen
-                else print listen ":" target
+                if (target == "" || target == listen) spec=listen
+                else spec=listen ":" target
+                if (proto == "udp") spec=spec "/udp"
+                print spec
                 listen=""
                 target=""
+                proto=""
             }
         }
     ' "$PAQET_CONFIG" 2>/dev/null
+}
+
+has_udp_forward_entries() {
+    get_current_forward_mappings 2>/dev/null | grep -q '/udp$'
 }
 
 # Change paqet port on Server B
