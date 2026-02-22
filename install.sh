@@ -3,7 +3,7 @@
 #  paqet Tunnel Installer
 #  Raw packet-level tunneling for bypassing network restrictions
 #  
-#  Usage: bash <(curl -fsSL https://raw.githubusercontent.com/g3ntrix/paqet-tunnel/main/install.sh)
+#  Usage: bash <(curl -fsSL https://raw.githubusercontent.com/Recoba86/paqet-tunnel/main/install.sh)
 #  
 #  This script downloads paqet binary from: https://github.com/hanselime/paqet
 #===============================================================================
@@ -22,7 +22,7 @@ AUTO_RESET_SCRIPT="$PAQET_DIR/auto-reset.sh"
 AUTO_RESET_SERVICE="paqet-auto-reset"
 AUTO_RESET_TIMER="paqet-auto-reset"
 GITHUB_REPO="hanselime/paqet"
-INSTALLER_REPO="g3ntrix/paqet-tunnel"
+INSTALLER_REPO="Recoba86/paqet-tunnel"
 INSTALLER_CMD="/usr/local/bin/paqet-tunnel"
 DONATE_TON="UQCriHkMUa6h9oN059tyC23T13OsQhGGM3hUS2S4IYRBZgvx"
 DONATE_USDT_BEP20="0x71F41696c60C4693305e67eE3Baa650a4E3dA796"

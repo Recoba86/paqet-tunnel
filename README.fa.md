@@ -28,7 +28,7 @@
 روی هر دو سرور (با دسترسی root):
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/g3ntrix/paqet-tunnel/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Recoba86/paqet-tunnel/main/install.sh)
 ```
 
 ## مراحل راه‌اندازی
