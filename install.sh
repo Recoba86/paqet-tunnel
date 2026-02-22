@@ -2267,14 +2267,10 @@ edit_ports() {
         
         print_success "Port updated to $NEW_PORT"
     else
-        if has_udp_forward_entries; then
-            print_warning "UDP forward entries detected in this config."
-            print_info "Use 'Manual edit config file (advanced)' for forward rules in mixed TCP/UDP setups."
-            return 1
-        fi
-
         echo -e "${CYAN}Current forward configuration:${NC}"
-        grep -A3 "^forward:" "$PAQET_CONFIG" | head -10
+        get_current_forward_mappings | while read spec; do
+            [ -n "$spec" ] && echo "  - $spec"
+        done
         echo ""
         
         local current_mappings=$(get_current_forward_mappings | paste -sd, -)
@@ -2296,7 +2292,7 @@ edit_ports() {
         ' "$PAQET_CONFIG" > "${PAQET_CONFIG}.tmp"
         mv "${PAQET_CONFIG}.tmp" "$PAQET_CONFIG"
         
-        print_success "Forward ports updated"
+        print_success "Forward mappings updated"
     fi
     
     echo ""
@@ -2332,20 +2328,13 @@ port_settings_menu() {
         else
             local server_addr=$(grep -A1 "^server:" "$PAQET_CONFIG" | grep "addr:" | awk '{print $2}' | tr -d '"')
             local server_port=$(echo "$server_addr" | cut -d':' -f2)
-            local udp_present=false
-            has_udp_forward_entries && udp_present=true
             echo -e "  Server B paqet port: ${CYAN}$server_port${NC}"
             echo ""
-            echo -e "  ${YELLOW}Forward Mappings (Iran -> Server B local):${NC}"
+            echo -e "  ${YELLOW}Forward Mappings (Iran -> Server B local, TCP/UDP):${NC}"
             get_current_forward_mappings | while read spec; do
                 [ -z "$spec" ] && continue
                 echo -e "    - ${CYAN}$spec${NC}"
             done
-            if [ "$udp_present" = true ]; then
-                echo ""
-                print_warning "UDP/mixed forwarding detected: Port add/remove/replace menu currently supports TCP-only edits."
-                print_info "Use 'Edit Configuration -> 6) Manual edit config file (advanced)' for UDP/mixed changes."
-            fi
         fi
         
         echo ""
@@ -2356,9 +2345,9 @@ port_settings_menu() {
             echo -e "  ${CYAN}1)${NC} Change paqet tunnel port"
         else
             echo -e "  ${CYAN}1)${NC} Change paqet tunnel port (Server B connection)"
-            echo -e "  ${CYAN}2)${NC} Add V2Ray forward port(s)"
-            echo -e "  ${CYAN}3)${NC} Remove V2Ray forward port"
-            echo -e "  ${CYAN}4)${NC} Replace all V2Ray forward ports"
+            echo -e "  ${CYAN}2)${NC} Add forward mapping(s) (TCP/UDP)"
+            echo -e "  ${CYAN}3)${NC} Remove forward mapping (TCP/UDP)"
+            echo -e "  ${CYAN}4)${NC} Replace all forward mappings (TCP/UDP)"
         fi
         echo -e "  ${CYAN}0)${NC} Back to main menu"
         echo ""
@@ -2375,33 +2364,21 @@ port_settings_menu() {
                 ;;
             2) 
                 if [ "$role" = "client" ]; then
-                    if has_udp_forward_entries; then
-                        print_error "UDP/mixed forward mappings detected. Use Manual edit config file (advanced)."
-                    else
-                        add_forward_ports
-                    fi
+                    add_forward_ports
                 else
                     print_error "Invalid choice"
                 fi
                 ;;
             3) 
                 if [ "$role" = "client" ]; then
-                    if has_udp_forward_entries; then
-                        print_error "UDP/mixed forward mappings detected. Use Manual edit config file (advanced)."
-                    else
-                        remove_forward_port
-                    fi
+                    remove_forward_port
                 else
                     print_error "Invalid choice"
                 fi
                 ;;
             4) 
                 if [ "$role" = "client" ]; then
-                    if has_udp_forward_entries; then
-                        print_error "UDP/mixed forward mappings detected. Use Manual edit config file (advanced)."
-                    else
-                        replace_all_forward_ports
-                    fi
+                    replace_all_forward_ports
                 else
                     print_error "Invalid choice"
                 fi
@@ -2545,33 +2522,39 @@ change_paqet_port_client() {
 # Add new forward port(s)
 add_forward_ports() {
     echo ""
-    echo -e "${CYAN}Current V2Ray forward mappings:${NC}"
+    echo -e "${CYAN}Current forward mappings:${NC}"
     local current_mappings_csv=$(get_current_forward_mappings | paste -sd, -)
     [ -z "$current_mappings_csv" ] && current_mappings_csv=$(get_current_forward_ports | tr '\n' ',' | sed 's/,$//')
     echo -e "  ${YELLOW}$current_mappings_csv${NC}"
     echo ""
     
-    read_forward_mappings "Enter port(s)/mapping(s) to ADD (comma-separated)" NEW_MAPPINGS
+    read_forward_mappings "Enter port(s)/mapping(s) to ADD (comma-separated)" NEW_MAPPINGS "" "tcp"
     
-    # Get existing listen ports and existing mappings
-    local existing_ports=$(get_current_forward_ports | tr '\n' ' ')
+    # Get existing listen/protocol keys and existing mappings
+    local existing_keys=""
     local existing_mappings="$current_mappings_csv"
+    local existing_spec=""
+    while read existing_spec; do
+        [ -z "$existing_spec" ] && continue
+        existing_keys="${existing_keys} $(mapping_protocol "$existing_spec"):$(mapping_listen_port "$existing_spec")"
+    done <<< "$(get_current_forward_mappings)"
     
-    # Parse new mappings and check for duplicates/conflicts (by listen port)
+    # Parse new mappings and check for duplicates/conflicts (by protocol+listen)
     local mappings_to_add=""
     local duplicates=""
     IFS=',' read -ra NEW_PORT_ARRAY <<< "$NEW_MAPPINGS"
     for spec in "${NEW_PORT_ARRAY[@]}"; do
         spec=$(echo "$spec" | tr -d ' ')
         [ -z "$spec" ] && continue
-        local listen_port
+        local listen_port proto key
         listen_port=$(mapping_listen_port "$spec")
-        if echo "$existing_ports" | grep -qw "$listen_port"; then
-            duplicates="${duplicates}${listen_port} "
+        proto=$(mapping_protocol "$spec")
+        key="${proto}:${listen_port}"
+        if echo " $existing_keys " | grep -qw "$key"; then
+            duplicates="${duplicates}${listen_port}/${proto} "
         else
-            # Check port conflict
-            if ss -tuln | grep -q ":${listen_port} "; then
-                print_warning "Port $listen_port is already in use by another process"
+            # Check port conflict for the same protocol only
+            if ! check_port_conflict_proto "$listen_port" "$proto"; then
                 echo -e "${YELLOW}Add anyway? (y/n)${NC}"
                 read -p "> " add_anyway < /dev/tty
                 if [[ ! "$add_anyway" =~ ^[Yy]$ ]]; then
@@ -2579,11 +2562,12 @@ add_forward_ports() {
                 fi
             fi
             mappings_to_add="${mappings_to_add}${mappings_to_add:+,}${spec}"
+            existing_keys="${existing_keys} ${key}"
         fi
     done
     
     if [ -n "$duplicates" ]; then
-        print_warning "Skipping duplicate ports: $duplicates"
+        print_warning "Skipping duplicate mappings: $duplicates"
     fi
     
     if [ -z "$mappings_to_add" ]; then
@@ -2611,7 +2595,7 @@ add_forward_ports() {
 # Remove a forward port
 remove_forward_port() {
     echo ""
-    echo -e "${CYAN}Current V2Ray forward mappings:${NC}"
+    echo -e "${CYAN}Current forward mappings:${NC}"
     local current_mappings_list=$(get_current_forward_mappings)
     local port_count=0
     local mappings_array=()
@@ -2635,31 +2619,48 @@ remove_forward_port() {
     fi
     
     echo ""
-    echo -e "${YELLOW}Enter the port number to remove (or port value):${NC}"
+    echo -e "${YELLOW}Enter the mapping number to remove, or exact mapping (e.g. 1090:443/udp, 443):${NC}"
     read -p "> " remove_input < /dev/tty
     
-    local listen_to_remove=""
+    local mapping_to_remove=""
     
-    # Check if input is a menu number or port value
+    # Check if input is a menu number or exact mapping
     if [[ "$remove_input" =~ ^[0-9]+$ ]] && [ "$remove_input" -le "$port_count" ] && [ "$remove_input" -gt 0 ]; then
-        listen_to_remove=$(mapping_listen_port "${mappings_array[$((remove_input - 1))]}")
+        mapping_to_remove="${mappings_array[$((remove_input - 1))]}"
     else
-        # Treat as listen port value
-        listen_to_remove="$remove_input"
+        local normalized_remove=""
+        if ! normalize_forward_mappings_input "$remove_input" normalized_remove "tcp"; then
+            print_error "Invalid mapping input"
+            return 1
+        fi
+        if echo "$normalized_remove" | grep -q ','; then
+            print_error "Please enter exactly one mapping to remove"
+            return 1
+        fi
+        mapping_to_remove="$normalized_remove"
     fi
     
-    # Verify listen port exists
-    if ! get_current_forward_ports | grep -qw "$listen_to_remove"; then
-        print_error "Port $listen_to_remove is not in the current configuration"
+    # Verify exact mapping exists
+    if ! echo "$current_mappings_list" | grep -Fxq "$mapping_to_remove"; then
+        # Fallback: if user entered just a port and both tcp+udp exist, explain ambiguity
+        if [[ "$mapping_to_remove" =~ ^[0-9]+$ ]]; then
+            local same_port_count
+            same_port_count=$(echo "$current_mappings_list" | while read spec; do
+                [ -n "$spec" ] && [ "$(mapping_listen_port "$spec")" = "$mapping_to_remove" ] && echo x
+            done | wc -l)
+            if [ "$same_port_count" -gt 1 ]; then
+                print_error "Port $mapping_to_remove exists on multiple protocols. Use exact mapping (e.g. $mapping_to_remove or ${mapping_to_remove}/udp)."
+                return 1
+            fi
+        fi
+        print_error "Mapping '$mapping_to_remove' is not in the current configuration"
         return 1
     fi
     
-    # Build new mapping list without the removed listen port
+    # Build new mapping list without the removed exact mapping
     local new_mappings=""
     for spec in "${mappings_array[@]}"; do
-        local listen_port
-        listen_port=$(mapping_listen_port "$spec")
-        if [ "$listen_port" != "$listen_to_remove" ]; then
+        if [ "$spec" != "$mapping_to_remove" ]; then
             new_mappings="${new_mappings}${new_mappings:+,}${spec}"
         fi
     done
@@ -2667,7 +2668,7 @@ remove_forward_port() {
     # Rebuild forward section
     rebuild_forward_config "$new_mappings" || return 1
     
-    print_success "Removed port: $listen_to_remove"
+    print_success "Removed mapping: $mapping_to_remove"
     
     echo ""
     read_confirm "Restart paqet service to apply changes?" restart_now "y"
@@ -2680,7 +2681,7 @@ remove_forward_port() {
 # Replace all forward ports
 replace_all_forward_ports() {
     echo ""
-    echo -e "${CYAN}Current V2Ray forward mappings:${NC}"
+    echo -e "${CYAN}Current forward mappings:${NC}"
     local current_mappings=$(get_current_forward_mappings | paste -sd, -)
     [ -z "$current_mappings" ] && current_mappings=$(get_current_forward_ports | tr '\n' ',' | sed 's/,$//')
     echo -e "  ${YELLOW}$current_mappings${NC}"
@@ -2689,23 +2690,31 @@ replace_all_forward_ports() {
     print_warning "This will replace ALL current forward ports!"
     echo ""
     
-    read_forward_mappings "Enter new forward ports/mappings (comma-separated)" NEW_MAPPINGS "$current_mappings"
+    read_forward_mappings "Enter new forward ports/mappings (comma-separated)" NEW_MAPPINGS "$current_mappings" "tcp"
     
-    # Check port conflicts
-    local current_listen_ports=$(get_current_forward_ports | tr '\n' ' ')
+    # Check port conflicts (protocol-aware); ignore currently configured same protocol+listen pairs
+    local current_keys=""
+    local cur_spec=""
+    while read cur_spec; do
+        [ -z "$cur_spec" ] && continue
+        current_keys="${current_keys} $(mapping_protocol "$cur_spec"):$(mapping_listen_port "$cur_spec")"
+    done <<< "$(get_current_forward_mappings)"
     IFS=',' read -ra PORTS <<< "$NEW_MAPPINGS"
     local mappings_str=""
     for spec in "${PORTS[@]}"; do
         spec=$(echo "$spec" | tr -d ' ')
         [ -z "$spec" ] && continue
-        local listen_port
+        local listen_port proto key
         listen_port=$(mapping_listen_port "$spec")
-        if ss -tuln | grep -q ":${listen_port} " && ! echo "$current_listen_ports" | grep -qw "$listen_port"; then
-            print_warning "Port $listen_port is already in use by another process"
+        proto=$(mapping_protocol "$spec")
+        key="${proto}:${listen_port}"
+        if ! echo " $current_keys " | grep -qw "$key"; then
+            if ! check_port_conflict_proto "$listen_port" "$proto"; then
             echo -e "${YELLOW}Include anyway? (y/n)${NC}"
             read -p "> " include_anyway < /dev/tty
             if [[ ! "$include_anyway" =~ ^[Yy]$ ]]; then
                 continue
+            fi
             fi
         fi
         mappings_str="${mappings_str}${mappings_str:+,}${spec}"
