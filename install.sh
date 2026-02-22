@@ -2052,6 +2052,7 @@ edit_config() {
     if [ "$role" = "client" ]; then
         echo -e "  ${CYAN}5)${NC} Change Server B address"
     fi
+    echo -e "  ${CYAN}6)${NC} Manual edit config file (advanced)"
     echo -e "  ${CYAN}0)${NC} Back to main menu"
     echo ""
     
@@ -2069,9 +2070,79 @@ edit_config() {
                 print_error "Invalid choice"
             fi
             ;;
+        6)
+            manual_edit_config_file
+            ;;
         0) return 0 ;;
         *) print_error "Invalid choice" ;;
     esac
+}
+
+get_preferred_text_editor() {
+    if [ -n "$EDITOR" ]; then
+        echo "$EDITOR"
+        return 0
+    fi
+    if command -v nano >/dev/null 2>&1; then
+        echo "nano"
+        return 0
+    fi
+    if command -v vim >/dev/null 2>&1; then
+        echo "vim"
+        return 0
+    fi
+    if command -v vi >/dev/null 2>&1; then
+        echo "vi"
+        return 0
+    fi
+    return 1
+}
+
+manual_edit_config_file() {
+    echo ""
+    echo -e "${YELLOW}Manual Config Edit (Advanced)${NC}"
+    echo -e "${CYAN}File:${NC} $PAQET_CONFIG"
+    echo ""
+    print_warning "You are about to edit the raw YAML config manually."
+    print_warning "Invalid YAML or wrong values can prevent the service from starting."
+    echo ""
+
+    if [ ! -f "$PAQET_CONFIG" ]; then
+        print_error "Configuration file not found: $PAQET_CONFIG"
+        return 1
+    fi
+
+    local editor_cmd=""
+    if ! editor_cmd=$(get_preferred_text_editor); then
+        print_error "No editor found (set \$EDITOR or install nano/vim/vi)."
+        return 1
+    fi
+
+    local backup_file="${PAQET_CONFIG}.manualedit.bak.$(date +%s)"
+    if cp "$PAQET_CONFIG" "$backup_file" 2>/dev/null; then
+        print_info "Backup created: $backup_file"
+    else
+        print_warning "Could not create backup file before editing"
+    fi
+
+    echo -e "${CYAN}Opening with:${NC} $editor_cmd"
+    echo ""
+
+    # Support EDITOR values with arguments (e.g. "vim -u NONE")
+    if ! sh -c "$editor_cmd \"$PAQET_CONFIG\"" < /dev/tty > /dev/tty 2>&1; then
+        print_warning "Editor exited with a non-zero status"
+    fi
+
+    echo ""
+    read_confirm "Restart paqet service to apply manual changes?" restart_now "y"
+    if [ "$restart_now" = true ]; then
+        if systemctl restart "$PAQET_SERVICE" >/dev/null 2>&1; then
+            print_success "Service restarted"
+        else
+            print_error "Service failed to restart"
+            print_info "Check logs: journalctl -u $PAQET_SERVICE -n 50"
+        fi
+    fi
 }
 
 edit_ports() {
