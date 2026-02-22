@@ -344,6 +344,145 @@ read_ports() {
     done
 }
 
+# Parse and validate forward mapping list (Server A)
+# Supports:
+#   443            -> listen 443, target 443
+#   8443:443       -> listen 8443, target 443
+#   443,8443:443   -> mixed entries
+# Returns normalized CSV (duplicates removed by validation):
+#   443,8443:443
+normalize_forward_mappings_input() {
+    local raw_input="$1"
+    local varname="$2"
+    local normalized_input=""
+
+    # Accept commas and/or spaces as separators
+    normalized_input=$(echo "$raw_input" | tr '[:space:]' ',' | sed 's/,,*/,/g; s/^,//; s/,$//')
+
+    if [ -z "$normalized_input" ]; then
+        print_error "At least one forward port or mapping is required."
+        return 1
+    fi
+
+    local normalized=""
+    local seen_listens=""
+    local item=""
+
+    IFS=',' read -ra items <<< "$normalized_input"
+    for item in "${items[@]}"; do
+        item=$(echo "$item" | tr -d ' ')
+        [ -z "$item" ] && continue
+
+        local listen_port=""
+        local target_port=""
+
+        if [[ "$item" =~ ^([0-9]+):([0-9]+)$ ]]; then
+            listen_port="${BASH_REMATCH[1]}"
+            target_port="${BASH_REMATCH[2]}"
+        elif [[ "$item" =~ ^[0-9]+$ ]]; then
+            listen_port="$item"
+            target_port="$item"
+        else
+            print_error "Invalid mapping: $item (use PORT or LISTEN:TARGET, e.g. 443 or 8443:443)"
+            return 1
+        fi
+
+        if [ "$listen_port" -lt 1 ] || [ "$listen_port" -gt 65535 ]; then
+            print_error "Invalid listen port: $listen_port (must be 1-65535)"
+            return 1
+        fi
+        if [ "$target_port" -lt 1 ] || [ "$target_port" -gt 65535 ]; then
+            print_error "Invalid target port: $target_port (must be 1-65535)"
+            return 1
+        fi
+
+        if echo " $seen_listens " | grep -qw "$listen_port"; then
+            print_error "Duplicate listen port: $listen_port (each listen port can appear only once)"
+            return 1
+        fi
+        seen_listens="${seen_listens} ${listen_port}"
+
+        local spec="$listen_port"
+        [ "$listen_port" != "$target_port" ] && spec="${listen_port}:${target_port}"
+        normalized="${normalized:+$normalized,}$spec"
+    done
+
+    if [ -z "$normalized" ]; then
+        print_error "No valid forward ports/mappings were provided."
+        return 1
+    fi
+
+    eval "$varname='$normalized'"
+    return 0
+}
+
+read_forward_mappings() {
+    local prompt="$1"
+    local varname="$2"
+    local default="$3"
+    local value=""
+
+    while true; do
+        if [ -n "$default" ]; then
+            echo -e "${YELLOW}${prompt} [${default}]:${NC}"
+        else
+            echo -e "${YELLOW}${prompt}:${NC}"
+        fi
+        echo -e "${CYAN}Format:${NC} 443 (same) or 8443:443 (Iran:ServerB local)"
+        read -p "> " value < /dev/tty
+
+        if [ -z "$value" ] && [ -n "$default" ]; then
+            value="$default"
+        fi
+
+        local normalized=""
+        if normalize_forward_mappings_input "$value" normalized; then
+            eval "$varname='$normalized'"
+            return 0
+        fi
+        echo ""
+    done
+}
+
+mapping_listen_port() {
+    local spec="$1"
+    echo "${spec%%:*}"
+}
+
+mapping_target_port() {
+    local spec="$1"
+    if [[ "$spec" == *:* ]]; then
+        echo "${spec##*:}"
+    else
+        echo "${spec%%:*}"
+    fi
+}
+
+build_forward_config_from_mappings_csv() {
+    local mappings_csv="$1"
+    local varname="$2"
+    local forward_config=""
+    local spec=""
+
+    IFS=',' read -ra mapping_specs <<< "$mappings_csv"
+    for spec in "${mapping_specs[@]}"; do
+        spec=$(echo "$spec" | tr -d ' ')
+        [ -z "$spec" ] && continue
+
+        local listen_port
+        local target_port
+        listen_port=$(mapping_listen_port "$spec")
+        target_port=$(mapping_target_port "$spec")
+
+        forward_config="${forward_config}
+  - listen: \"0.0.0.0:${listen_port}\"
+    target: \"127.0.0.1:${target_port}\"
+    protocol: \"tcp\""
+    done
+
+    printf -v "$varname" '%s' "$forward_config"
+}
+
 # Read MAC address with validation
 # Usage: read_mac "prompt" "variable_name" ["default_value"]
 read_mac() {
@@ -1551,17 +1690,20 @@ setup_server_a() {
         [ -n "$input_mac" ] && gateway_mac="$input_mac"
     fi
     
-    # Ports to forward (with validation)
+    # Ports/mappings to forward (with validation)
     echo ""
     echo -e "${CYAN}These will be accessible on this server and forwarded to Server B${NC}"
-    read_ports "Enter ports to forward (comma-separated)" FORWARD_PORTS "$DEFAULT_FORWARD_PORTS"
+    echo -e "${CYAN}Use same port:${NC} ${YELLOW}443${NC}   ${CYAN}or map different port:${NC} ${YELLOW}8443:443${NC}"
+    read_forward_mappings "Enter forward ports/mappings (comma-separated)" FORWARD_MAPPINGS "$DEFAULT_FORWARD_PORTS"
     
     # Check port conflicts
     echo ""
-    IFS=',' read -ra PORTS <<< "$FORWARD_PORTS"
-    for port in "${PORTS[@]}"; do
-        port=$(echo "$port" | tr -d ' ')
-        check_port_conflict "$port" || return 0
+    IFS=',' read -ra MAPPING_SPECS <<< "$FORWARD_MAPPINGS"
+    for spec in "${MAPPING_SPECS[@]}"; do
+        spec=$(echo "$spec" | tr -d ' ')
+        local listen_port
+        listen_port=$(mapping_listen_port "$spec")
+        check_port_conflict "$listen_port" || return 0
     done
 
     # PaqX-style automatic profile (CPU/RAM-aware)
@@ -1581,13 +1723,7 @@ setup_server_a() {
     
     # Build forward section
     local forward_config=""
-    for port in "${PORTS[@]}"; do
-        port=$(echo "$port" | tr -d ' ')
-        forward_config="${forward_config}
-  - listen: \"0.0.0.0:${port}\"
-    target: \"127.0.0.1:${port}\"
-    protocol: \"tcp\""
-    done
+    build_forward_config_from_mappings_csv "$FORWARD_MAPPINGS" forward_config
     
     cat > "$PAQET_CONFIG" << EOF
 # paqet Client Configuration (Port Forwarding Mode)
@@ -1655,20 +1791,30 @@ EOF
     echo -e "  ${YELLOW}Tunnel Name:${NC}   ${CYAN}$TUNNEL_NAME${NC}"
     echo -e "  ${YELLOW}This Server:${NC}   ${CYAN}$public_ip${NC}"
     echo -e "  ${YELLOW}Server B:${NC}      ${CYAN}$SERVER_B_IP:$SERVER_B_PORT${NC}"
-    echo -e "  ${YELLOW}Forwarding:${NC}    ${CYAN}$FORWARD_PORTS${NC}"
+    echo -e "  ${YELLOW}Forwarding:${NC}    ${CYAN}$FORWARD_MAPPINGS${NC}"
     echo ""
     echo -e "${YELLOW}Client Connection:${NC}"
     echo -e "  Clients should connect to: ${CYAN}$advertised_host${NC}"
-    echo -e "  On ports: ${CYAN}$FORWARD_PORTS${NC}"
+    local listen_ports_summary=""
+    for spec in "${MAPPING_SPECS[@]}"; do
+        spec=$(echo "$spec" | tr -d ' ')
+        local lp
+        lp=$(mapping_listen_port "$spec")
+        listen_ports_summary="${listen_ports_summary}${listen_ports_summary:+,}${lp}"
+    done
+    echo -e "  On ports: ${CYAN}$listen_ports_summary${NC}"
     if [ "$advertised_host" != "$public_ip" ]; then
         echo -e "  ${YELLOW}(Detected local IP was:${NC} ${CYAN}$public_ip${NC}${YELLOW})${NC}"
     fi
     echo ""
     echo -e "${YELLOW}Example V2Ray config update:${NC}"
-    for port in "${PORTS[@]}"; do
-        port=$(echo "$port" | tr -d ' ')
-        echo -e "  Change: ${RED}vless://...@${SERVER_B_IP}:${port}${NC}"
-        echo -e "  To:     ${GREEN}vless://...@${advertised_host}:${port}${NC}"
+    for spec in "${MAPPING_SPECS[@]}"; do
+        spec=$(echo "$spec" | tr -d ' ')
+        local listen_port target_port
+        listen_port=$(mapping_listen_port "$spec")
+        target_port=$(mapping_target_port "$spec")
+        echo -e "  Change: ${RED}vless://...@${SERVER_B_IP}:${target_port}${NC}"
+        echo -e "  To:     ${GREEN}vless://...@${advertised_host}:${listen_port}${NC}"
     done
     echo ""
     echo -e "${YELLOW}Commands:${NC}"
@@ -1948,18 +2094,13 @@ edit_ports() {
         grep -A3 "^forward:" "$PAQET_CONFIG" | head -10
         echo ""
         
-        read_ports "Enter new forward ports (comma-separated)" NEW_PORTS "$DEFAULT_FORWARD_PORTS"
+        local current_mappings=$(get_current_forward_mappings | paste -sd, -)
+        [ -z "$current_mappings" ] && current_mappings="$DEFAULT_FORWARD_PORTS"
+        read_forward_mappings "Enter new forward ports/mappings (comma-separated)" NEW_MAPPINGS "$current_mappings"
         
         # Rebuild forward section
         local forward_config=""
-        IFS=',' read -ra PORTS <<< "$NEW_PORTS"
-        for port in "${PORTS[@]}"; do
-            port=$(echo "$port" | tr -d ' ')
-            forward_config="${forward_config}
-  - listen: \"0.0.0.0:${port}\"
-    target: \"127.0.0.1:${port}\"
-    protocol: \"tcp\""
-        done
+        build_forward_config_from_mappings_csv "$NEW_MAPPINGS" forward_config
         
         # Use awk to replace the forward section
         awk -v new_forward="forward:${forward_config}" '
@@ -2007,9 +2148,10 @@ port_settings_menu() {
             local server_port=$(echo "$server_addr" | cut -d':' -f2)
             echo -e "  Server B paqet port: ${CYAN}$server_port${NC}"
             echo ""
-            echo -e "  ${YELLOW}V2Ray Forward Ports:${NC}"
-            get_current_forward_ports | while read port; do
-                echo -e "    - ${CYAN}$port${NC}"
+            echo -e "  ${YELLOW}V2Ray Forward Mappings (Iran -> Server B local):${NC}"
+            get_current_forward_mappings | while read spec; do
+                [ -z "$spec" ] && continue
+                echo -e "    - ${CYAN}$spec${NC}"
             done
         fi
         
@@ -2073,6 +2215,35 @@ port_settings_menu() {
 get_current_forward_ports() {
     # Extract port from listen: "0.0.0.0:PORT" format
     grep 'listen:' "$PAQET_CONFIG" 2>/dev/null | grep -oE ':[0-9]+"' | tr -d ':"' | sort -nu
+}
+
+# Get current forward mappings from config
+# Outputs one item per line:
+#   443
+#   8443:443
+get_current_forward_mappings() {
+    awk '
+        /^forward:/ { in_forward=1; next }
+        in_forward && /^[a-z]/ { in_forward=0 }
+        in_forward && /listen:/ {
+            line=$0
+            sub(/^.*:/, "", line)
+            sub(/".*$/, "", line)
+            listen=line
+        }
+        in_forward && /target:/ {
+            line=$0
+            sub(/^.*:/, "", line)
+            sub(/".*$/, "", line)
+            target=line
+            if (listen != "") {
+                if (target == "" || target == listen) print listen
+                else print listen ":" target
+                listen=""
+                target=""
+            }
+        }
+    ' "$PAQET_CONFIG" 2>/dev/null
 }
 
 # Change paqet port on Server B
@@ -2154,35 +2325,40 @@ change_paqet_port_client() {
 # Add new forward port(s)
 add_forward_ports() {
     echo ""
-    echo -e "${CYAN}Current V2Ray forward ports:${NC}"
-    local current_ports=$(get_current_forward_ports | tr '\n' ',' | sed 's/,$//')
-    echo -e "  ${YELLOW}$current_ports${NC}"
+    echo -e "${CYAN}Current V2Ray forward mappings:${NC}"
+    local current_mappings_csv=$(get_current_forward_mappings | paste -sd, -)
+    [ -z "$current_mappings_csv" ] && current_mappings_csv=$(get_current_forward_ports | tr '\n' ',' | sed 's/,$//')
+    echo -e "  ${YELLOW}$current_mappings_csv${NC}"
     echo ""
     
-    read_ports "Enter port(s) to ADD (comma-separated)" NEW_PORTS
+    read_forward_mappings "Enter port(s)/mapping(s) to ADD (comma-separated)" NEW_MAPPINGS
     
-    # Get existing ports
+    # Get existing listen ports and existing mappings
     local existing_ports=$(get_current_forward_ports | tr '\n' ' ')
+    local existing_mappings="$current_mappings_csv"
     
-    # Parse new ports and check for duplicates
-    local ports_to_add=""
+    # Parse new mappings and check for duplicates/conflicts (by listen port)
+    local mappings_to_add=""
     local duplicates=""
-    IFS=',' read -ra NEW_PORT_ARRAY <<< "$NEW_PORTS"
-    for port in "${NEW_PORT_ARRAY[@]}"; do
-        port=$(echo "$port" | tr -d ' ')
-        if echo "$existing_ports" | grep -qw "$port"; then
-            duplicates="${duplicates}${port} "
+    IFS=',' read -ra NEW_PORT_ARRAY <<< "$NEW_MAPPINGS"
+    for spec in "${NEW_PORT_ARRAY[@]}"; do
+        spec=$(echo "$spec" | tr -d ' ')
+        [ -z "$spec" ] && continue
+        local listen_port
+        listen_port=$(mapping_listen_port "$spec")
+        if echo "$existing_ports" | grep -qw "$listen_port"; then
+            duplicates="${duplicates}${listen_port} "
         else
             # Check port conflict
-            if ss -tuln | grep -q ":${port} "; then
-                print_warning "Port $port is already in use by another process"
+            if ss -tuln | grep -q ":${listen_port} "; then
+                print_warning "Port $listen_port is already in use by another process"
                 echo -e "${YELLOW}Add anyway? (y/n)${NC}"
                 read -p "> " add_anyway < /dev/tty
                 if [[ ! "$add_anyway" =~ ^[Yy]$ ]]; then
                     continue
                 fi
             fi
-            ports_to_add="${ports_to_add}${port} "
+            mappings_to_add="${mappings_to_add}${mappings_to_add:+,}${spec}"
         fi
     done
     
@@ -2190,18 +2366,19 @@ add_forward_ports() {
         print_warning "Skipping duplicate ports: $duplicates"
     fi
     
-    if [ -z "$ports_to_add" ]; then
-        print_info "No new ports to add"
+    if [ -z "$mappings_to_add" ]; then
+        print_info "No new ports/mappings to add"
         return 0
     fi
     
-    # Combine existing and new ports
-    local all_ports="$existing_ports $ports_to_add"
+    # Combine existing and new mappings
+    local all_mappings="$existing_mappings"
+    [ -z "$all_mappings" ] && all_mappings="$mappings_to_add" || all_mappings="${all_mappings},${mappings_to_add}"
     
     # Rebuild forward section
-    rebuild_forward_config "$all_ports"
+    rebuild_forward_config "$all_mappings" || return 1
     
-    print_success "Added ports: $ports_to_add"
+    print_success "Added mappings: $mappings_to_add"
     
     echo ""
     read_confirm "Restart paqet service to apply changes?" restart_now "y"
@@ -2214,18 +2391,18 @@ add_forward_ports() {
 # Remove a forward port
 remove_forward_port() {
     echo ""
-    echo -e "${CYAN}Current V2Ray forward ports:${NC}"
-    local current_ports_list=$(get_current_forward_ports)
+    echo -e "${CYAN}Current V2Ray forward mappings:${NC}"
+    local current_mappings_list=$(get_current_forward_mappings)
     local port_count=0
-    local ports_array=()
+    local mappings_array=()
     
-    while read port; do
-        if [ -n "$port" ]; then
+    while read spec; do
+        if [ -n "$spec" ]; then
             port_count=$((port_count + 1))
-            ports_array+=("$port")
-            echo -e "  ${CYAN}$port_count)${NC} $port"
+            mappings_array+=("$spec")
+            echo -e "  ${CYAN}$port_count)${NC} $spec"
         fi
-    done <<< "$current_ports_list"
+    done <<< "$current_mappings_list"
     
     if [ $port_count -eq 0 ]; then
         print_error "No forward ports configured"
@@ -2241,34 +2418,36 @@ remove_forward_port() {
     echo -e "${YELLOW}Enter the port number to remove (or port value):${NC}"
     read -p "> " remove_input < /dev/tty
     
-    local port_to_remove=""
+    local listen_to_remove=""
     
     # Check if input is a menu number or port value
     if [[ "$remove_input" =~ ^[0-9]+$ ]] && [ "$remove_input" -le "$port_count" ] && [ "$remove_input" -gt 0 ]; then
-        port_to_remove="${ports_array[$((remove_input - 1))]}"
+        listen_to_remove=$(mapping_listen_port "${mappings_array[$((remove_input - 1))]}")
     else
-        # Treat as port value
-        port_to_remove="$remove_input"
+        # Treat as listen port value
+        listen_to_remove="$remove_input"
     fi
     
-    # Verify port exists
-    if ! echo "$current_ports_list" | grep -qw "$port_to_remove"; then
-        print_error "Port $port_to_remove is not in the current configuration"
+    # Verify listen port exists
+    if ! get_current_forward_ports | grep -qw "$listen_to_remove"; then
+        print_error "Port $listen_to_remove is not in the current configuration"
         return 1
     fi
     
-    # Build new port list without the removed port
-    local new_ports=""
-    for port in "${ports_array[@]}"; do
-        if [ "$port" != "$port_to_remove" ]; then
-            new_ports="${new_ports}${port} "
+    # Build new mapping list without the removed listen port
+    local new_mappings=""
+    for spec in "${mappings_array[@]}"; do
+        local listen_port
+        listen_port=$(mapping_listen_port "$spec")
+        if [ "$listen_port" != "$listen_to_remove" ]; then
+            new_mappings="${new_mappings}${new_mappings:+,}${spec}"
         fi
     done
     
     # Rebuild forward section
-    rebuild_forward_config "$new_ports"
+    rebuild_forward_config "$new_mappings" || return 1
     
-    print_success "Removed port: $port_to_remove"
+    print_success "Removed port: $listen_to_remove"
     
     echo ""
     read_confirm "Restart paqet service to apply changes?" restart_now "y"
@@ -2281,41 +2460,46 @@ remove_forward_port() {
 # Replace all forward ports
 replace_all_forward_ports() {
     echo ""
-    echo -e "${CYAN}Current V2Ray forward ports:${NC}"
-    local current_ports=$(get_current_forward_ports | tr '\n' ',' | sed 's/,$//')
-    echo -e "  ${YELLOW}$current_ports${NC}"
+    echo -e "${CYAN}Current V2Ray forward mappings:${NC}"
+    local current_mappings=$(get_current_forward_mappings | paste -sd, -)
+    [ -z "$current_mappings" ] && current_mappings=$(get_current_forward_ports | tr '\n' ',' | sed 's/,$//')
+    echo -e "  ${YELLOW}$current_mappings${NC}"
     echo ""
     
     print_warning "This will replace ALL current forward ports!"
     echo ""
     
-    read_ports "Enter new forward ports (comma-separated)" NEW_PORTS "$current_ports"
+    read_forward_mappings "Enter new forward ports/mappings (comma-separated)" NEW_MAPPINGS "$current_mappings"
     
     # Check port conflicts
-    IFS=',' read -ra PORTS <<< "$NEW_PORTS"
-    local ports_str=""
-    for port in "${PORTS[@]}"; do
-        port=$(echo "$port" | tr -d ' ')
-        if ss -tuln | grep -q ":${port} " && ! echo "$current_ports" | grep -q "$port"; then
-            print_warning "Port $port is already in use by another process"
+    local current_listen_ports=$(get_current_forward_ports | tr '\n' ' ')
+    IFS=',' read -ra PORTS <<< "$NEW_MAPPINGS"
+    local mappings_str=""
+    for spec in "${PORTS[@]}"; do
+        spec=$(echo "$spec" | tr -d ' ')
+        [ -z "$spec" ] && continue
+        local listen_port
+        listen_port=$(mapping_listen_port "$spec")
+        if ss -tuln | grep -q ":${listen_port} " && ! echo "$current_listen_ports" | grep -qw "$listen_port"; then
+            print_warning "Port $listen_port is already in use by another process"
             echo -e "${YELLOW}Include anyway? (y/n)${NC}"
             read -p "> " include_anyway < /dev/tty
             if [[ ! "$include_anyway" =~ ^[Yy]$ ]]; then
                 continue
             fi
         fi
-        ports_str="${ports_str}${port} "
+        mappings_str="${mappings_str}${mappings_str:+,}${spec}"
     done
     
-    if [ -z "$ports_str" ]; then
-        print_error "No valid ports provided"
+    if [ -z "$mappings_str" ]; then
+        print_error "No valid ports/mappings provided"
         return 1
     fi
     
     # Rebuild forward section
-    rebuild_forward_config "$ports_str"
+    rebuild_forward_config "$mappings_str" || return 1
     
-    print_success "Forward ports updated to: $ports_str"
+    print_success "Forward mappings updated to: $mappings_str"
     
     echo ""
     read_confirm "Restart paqet service to apply changes?" restart_now "y"
@@ -2327,18 +2511,14 @@ replace_all_forward_ports() {
 
 # Helper: Rebuild the forward config section
 rebuild_forward_config() {
-    local ports_str="$1"
+    local mappings_input="$1"
+    local mappings_csv=""
+    if ! normalize_forward_mappings_input "$mappings_input" mappings_csv; then
+        return 1
+    fi
     
     local forward_config=""
-    for port in $ports_str; do
-        port=$(echo "$port" | tr -d ' ')
-        if [ -n "$port" ]; then
-            forward_config="${forward_config}
-  - listen: \"0.0.0.0:${port}\"
-    target: \"127.0.0.1:${port}\"
-    protocol: \"tcp\""
-        fi
-    done
+    build_forward_config_from_mappings_csv "$mappings_csv" forward_config
     
     # Use awk to replace the forward section
     awk -v new_forward="forward:${forward_config}" '
@@ -2347,6 +2527,7 @@ rebuild_forward_config() {
         !in_forward { print }
     ' "$PAQET_CONFIG" > "${PAQET_CONFIG}.tmp"
     mv "${PAQET_CONFIG}.tmp" "$PAQET_CONFIG"
+    return 0
 }
 
 edit_secret_key() {
