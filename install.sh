@@ -674,6 +674,18 @@ get_public_ip() {
     fi
 }
 
+is_private_or_nonpublic_ipv4() {
+    local ip="$1"
+    # RFC1918 + loopback + link-local + CGNAT
+    [[ "$ip" =~ ^10\. ]] && return 0
+    [[ "$ip" =~ ^192\.168\. ]] && return 0
+    [[ "$ip" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]] && return 0
+    [[ "$ip" =~ ^127\. ]] && return 0
+    [[ "$ip" =~ ^169\.254\. ]] && return 0
+    [[ "$ip" =~ ^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\. ]] && return 0
+    return 1
+}
+
 get_local_ip() {
     local interface=$1
     ip -4 addr show "$interface" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1
@@ -1489,6 +1501,7 @@ setup_server_a() {
     local interface=$(get_default_interface)
     local local_ip=$(get_local_ip "$interface")
     local public_ip=$(get_public_ip)
+    local advertised_host="$public_ip"
     local gateway_mac=$(get_gateway_mac)
     
     echo -e "${YELLOW}Network Configuration Detected:${NC}"
@@ -1497,6 +1510,16 @@ setup_server_a() {
     echo -e "  Public IP:   ${CYAN}$public_ip${NC}"
     echo -e "  Gateway MAC: ${CYAN}$gateway_mac${NC}"
     echo ""
+
+    if is_private_or_nonpublic_ipv4 "$public_ip"; then
+        print_warning "Detected a private/non-public IP for this server ($public_ip)."
+        print_info "This does NOT break the paqet tunnel to Server B (outbound tunnel can still work)."
+        print_info "If clients connect from outside your LAN, use your router WAN IP / DDNS and port forwarding."
+        echo ""
+        read_optional "Advertised client IP/hostname for examples (optional)" advertised_override
+        [ -n "$advertised_override" ] && advertised_host="$advertised_override"
+        echo ""
+    fi
     
     # Get Server B details (with validation - keeps asking until valid)
     echo -e "${CYAN}Enter Server B (Abroad) connection details for tunnel '${TUNNEL_NAME}'${NC}"
@@ -1635,14 +1658,17 @@ EOF
     echo -e "  ${YELLOW}Forwarding:${NC}    ${CYAN}$FORWARD_PORTS${NC}"
     echo ""
     echo -e "${YELLOW}Client Connection:${NC}"
-    echo -e "  Clients should connect to: ${CYAN}$public_ip${NC}"
+    echo -e "  Clients should connect to: ${CYAN}$advertised_host${NC}"
     echo -e "  On ports: ${CYAN}$FORWARD_PORTS${NC}"
+    if [ "$advertised_host" != "$public_ip" ]; then
+        echo -e "  ${YELLOW}(Detected local IP was:${NC} ${CYAN}$public_ip${NC}${YELLOW})${NC}"
+    fi
     echo ""
     echo -e "${YELLOW}Example V2Ray config update:${NC}"
     for port in "${PORTS[@]}"; do
         port=$(echo "$port" | tr -d ' ')
         echo -e "  Change: ${RED}vless://...@${SERVER_B_IP}:${port}${NC}"
-        echo -e "  To:     ${GREEN}vless://...@${public_ip}:${port}${NC}"
+        echo -e "  To:     ${GREEN}vless://...@${advertised_host}:${port}${NC}"
     done
     echo ""
     echo -e "${YELLOW}Commands:${NC}"
