@@ -461,7 +461,7 @@ mapping_target_port() {
 build_forward_config_from_mappings_csv() {
     local mappings_csv="$1"
     local varname="$2"
-    local forward_config=""
+    local rendered_forward_config=""
     local spec=""
 
     IFS=',' read -ra mapping_specs <<< "$mappings_csv"
@@ -474,13 +474,18 @@ build_forward_config_from_mappings_csv() {
         listen_port=$(mapping_listen_port "$spec")
         target_port=$(mapping_target_port "$spec")
 
-        forward_config="${forward_config}
+        rendered_forward_config="${rendered_forward_config}
   - listen: \"0.0.0.0:${listen_port}\"
     target: \"127.0.0.1:${target_port}\"
     protocol: \"tcp\""
     done
 
-    printf -v "$varname" '%s' "$forward_config"
+    if [ -z "$rendered_forward_config" ]; then
+        return 1
+    fi
+
+    printf -v "$varname" '%s' "$rendered_forward_config"
+    return 0
 }
 
 # Read MAC address with validation
@@ -1723,7 +1728,10 @@ setup_server_a() {
     
     # Build forward section
     local forward_config=""
-    build_forward_config_from_mappings_csv "$FORWARD_MAPPINGS" forward_config
+    if ! build_forward_config_from_mappings_csv "$FORWARD_MAPPINGS" forward_config; then
+        print_error "Failed to build forward configuration from mappings: $FORWARD_MAPPINGS"
+        return 1
+    fi
     
     cat > "$PAQET_CONFIG" << EOF
 # paqet Client Configuration (Port Forwarding Mode)
@@ -2171,7 +2179,10 @@ edit_ports() {
         
         # Rebuild forward section
         local forward_config=""
-        build_forward_config_from_mappings_csv "$NEW_MAPPINGS" forward_config
+        if ! build_forward_config_from_mappings_csv "$NEW_MAPPINGS" forward_config; then
+            print_error "Failed to build forward configuration"
+            return 1
+        fi
         
         # Use awk to replace the forward section
         awk -v new_forward="forward:${forward_config}" '
