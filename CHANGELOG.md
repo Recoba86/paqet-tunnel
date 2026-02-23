@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+- No changes yet
+
+## v1.11.1
+
 - PaqX-style auto KCP tuning (CPU/RAM-aware) for new Server A / Server B setups
 - PaqX-style kernel optimization (BBR, TCP Fast Open, socket buffers) via `/etc/sysctl.d/99-paqet-tunnel.conf`
 - Core binary updater for `paqet` (`hanselime/paqet` releases)
@@ -13,6 +17,12 @@ All notable changes to this project are documented in this file.
 - Main menu now shows installed `paqet` core version
 - More robust `paqet` archive extraction with binary auto-detection (less dependent on exact upstream filenames)
 - Default KCP MTU baseline changed to `1300`
+- Server A forward mappings now support `listen:target` syntax (example: `1090:443`)
+- UDP and mixed TCP/UDP forwarding support in Server A setup (WireGuard/Hysteria-friendly)
+- Protocol-aware Port Settings add/remove/replace for TCP/UDP/mixed forward mappings
+- Advanced manual config editor in Edit Configuration (backup + optional restart)
+- Private/NAT IP detection warning and advertised endpoint override for Server A display/output
+- Fixed empty `forward:` generation edge case for mapped ports and hardened mapping rebuild validation
 
 ## v1.11.0
 

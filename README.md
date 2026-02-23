@@ -4,17 +4,24 @@
 
 Easy installer for tunneling VPN traffic through a middle server using [paqet](https://github.com/hanselime/paqet) - a raw packet-level tunneling tool that bypasses network restrictions.
 
-**Current Version:** v1.11.0
+**Current Version:** v1.11.1
 
 ## Changelog
 
-### Unreleased
+### v1.11.1
 - **PaqX-style Auto Tuning (CPU/RAM)** - New setups now auto-calculate KCP defaults (`conn`, `rcvwnd`, `sndwnd`) based on server resources
 - **PaqX-style Kernel Optimization** - Setup now applies BBR/TCP Fast Open/socket buffer sysctl tuning via a dedicated file in `/etc/sysctl.d/`
 - **Core Binary Updater** - New menu option (**b**) to update the `paqet` core binary from `hanselime/paqet` releases (separate from installer self-update)
 - **Retrofit Auto-Tune** - New menu option (**k**) to apply the auto-tuned KCP profile to existing configs without recreating tunnels
 - **Read-only Auto Profile View** - New menu option (**p**) to inspect detected CPU/RAM and computed KCP values without applying changes
 - **Updates Submenu** - Installer and core updates are grouped under a single Updates menu
+- **Port Mapping Support (Server A)** - Supports `listen:target` mappings like `1090:443`
+- **UDP and Mixed Forwarding** - Supports TCP-only, UDP-only, and mixed mappings (for example `51820/udp`, `1090:443/udp`)
+- **Manual Config Editor** - Advanced YAML editor in Edit Configuration with backup + optional restart
+- **Forward Generation Hardening** - Fixed empty `forward:` generation edge case and improved mapping rebuild safety
+
+### Unreleased
+- No changes yet
 
 ### v1.11.0
 - **IPTables Port Forwarding** - New menu option (**f**) under Maintenance: kernel-level NAT port forwarding (multi-port, all-ports with exclusions, view/remove/flush). Enables segregated port management and testing backup tunnels without service restarts.
@@ -77,10 +84,10 @@ Easy installer for tunneling VPN traffic through a middle server using [paqet](h
 - **Interactive Setup** - Guided installation for both Iran and abroad servers
 - **Multi-Tunnel Support** - Connect one Server A to multiple Server Bs with named tunnels
 - **Install as Command** - Run `paqet-tunnel` after installing
-- **Port Settings Menu** - Add, remove, or change V2Ray ports without reconfiguring
+- **Port Settings Menu** - Protocol-aware add/remove/replace for TCP/UDP/mixed forward mappings without full reconfiguration
 - **Input Validation** - Won't exit on invalid input, keeps asking until valid
 - **Iran Network Optimization** - Optional DNS and apt mirror optimization for Iran servers
-- **Configuration Editor** - Change ports, keys, KCP settings, and MTU without manual file editing
+- **Configuration Editor** - Change ports, keys, KCP settings, and MTU, plus advanced manual YAML editing with backup
 - **Connection Test Tool** - Built-in diagnostics to verify tunnel connectivity
 - **Auto-Updater** - Check for and install updates from within the script
 - **Automatic Reset** - Scheduled service restart for reliability (configurable interval)
@@ -210,7 +217,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Recoba86/paqet-tunnel/main/i
 5. Enter paqet port: `8888`
 6. Enter the **secret key** from Step 1
 7. Confirm network settings
-8. Enter port(s) to forward (same as V2Ray ports)
+8. Choose forwarding mode (`TCP`, `UDP`, or `Both`)
+9. Enter forward ports/mappings (examples: `443`, `1090:443`, `51820/udp`, `1090:443/udp`)
 
 To add more tunnels, run setup again (option **2** or via **Manage Tunnels**) with a different name.
 
@@ -249,7 +257,7 @@ vless://uuid@<SERVER_B_IP>:443?type=tcp&...
 vless://uuid@<SERVER_A_IP>:443?type=tcp&...
 ```
 
-Only change the IP address - everything else stays the same!
+Only change the IP address (and port, if you chose a different listen port on Server A) - everything else stays the same!
 
 ## ⚠️ Important: V2Ray Inbound Configuration
 
@@ -393,15 +401,17 @@ Change settings without manually editing config files. If multiple tunnels exist
 - **KCP Settings** - Adjust mode (normal/fast/fast2/fast3), connections, and MTU
 - **Network Interface** - Change the network interface
 - **Server B Address** - Update the abroad server IP/port (client only)
+- **Manual edit config file (advanced)** - Open the raw YAML in `$EDITOR` / `nano` / `vim` with backup + optional restart
 
 **Port Settings** (first option in Edit Configuration):
 
 **For Server A (Iran/Client):**
-- View current V2Ray forward ports
+- View current forward mappings (TCP/UDP)
 - Change paqet tunnel port (connection to Server B)
-- Add new V2Ray forward port(s)
-- Remove individual V2Ray forward port
-- Replace all V2Ray forward ports
+- Add new forward mapping(s) (TCP/UDP)
+- Remove individual forward mapping (TCP/UDP)
+- Replace all forward mappings (TCP/UDP)
+- Supported formats: `443`, `8443:443`, `51820/udp`, `1090:443/udp`
 
 **For Server B (Abroad/Server):**
 - View current paqet tunnel port
@@ -516,6 +526,7 @@ cat /opt/paqet/config.yaml
 - Check iptables rules: `iptables -t raw -L -n`
 - Ensure cloud firewall allows the paqet port (8888)
 - Make sure V2Ray inbound listens on `0.0.0.0`
+- For WireGuard/Hysteria or other UDP services, make sure the forward mapping uses `/udp` and the backend is listening on UDP
 - Run the **Test Connection** tool (option 7) for diagnostics
 
 **Download blocked in Iran:**
