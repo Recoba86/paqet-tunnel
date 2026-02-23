@@ -359,6 +359,7 @@ normalize_forward_mappings_input() {
     local varname="$2"
     local default_protocol="${3:-tcp}"
     local normalized_input=""
+    local normalized_output=""
 
     # Accept commas and/or spaces as separators
     normalized_input=$(echo "$raw_input" | tr '[:space:]' ',' | sed 's/,,*/,/g; s/^,//; s/,$//')
@@ -368,7 +369,6 @@ normalize_forward_mappings_input() {
         return 1
     fi
 
-    local normalized=""
     local seen_keys=""
     local item=""
 
@@ -417,15 +417,15 @@ normalize_forward_mappings_input() {
         local spec="$listen_port"
         [ "$listen_port" != "$target_port" ] && spec="${listen_port}:${target_port}"
         [ "$protocol" = "udp" ] && spec="${spec}/udp"
-        normalized="${normalized:+$normalized,}$spec"
+        normalized_output="${normalized_output:+$normalized_output,}$spec"
     done
 
-    if [ -z "$normalized" ]; then
+    if [ -z "$normalized_output" ]; then
         print_error "No valid forward ports/mappings were provided."
         return 1
     fi
 
-    eval "$varname='$normalized'"
+    printf -v "$varname" '%s' "$normalized_output"
     return 0
 }
 
@@ -453,9 +453,14 @@ read_forward_mappings() {
             value="$default"
         fi
 
-        local normalized=""
-        if normalize_forward_mappings_input "$value" normalized "$default_protocol"; then
-            eval "$varname='$normalized'"
+        local normalized_mappings=""
+        if normalize_forward_mappings_input "$value" normalized_mappings "$default_protocol"; then
+            if [ -z "$normalized_mappings" ]; then
+                print_error "Internal error: normalized forward mappings are empty."
+                echo ""
+                continue
+            fi
+            printf -v "$varname" '%s' "$normalized_mappings"
             return 0
         fi
         echo ""
@@ -1778,7 +1783,16 @@ setup_server_a() {
             echo ""
             echo -e "${CYAN}UDP mappings (examples):${NC} ${YELLOW}51820/udp${NC}, ${YELLOW}1090:443/udp${NC}"
             read_forward_mappings "Enter UDP forward ports/mappings (comma-separated)" FORWARD_UDP_MAPPINGS "" "udp"
-            FORWARD_MAPPINGS="${FORWARD_TCP_MAPPINGS},${FORWARD_UDP_MAPPINGS}"
+            if [ -n "$FORWARD_TCP_MAPPINGS" ] && [ -n "$FORWARD_UDP_MAPPINGS" ]; then
+                FORWARD_MAPPINGS="${FORWARD_TCP_MAPPINGS},${FORWARD_UDP_MAPPINGS}"
+            elif [ -n "$FORWARD_TCP_MAPPINGS" ]; then
+                FORWARD_MAPPINGS="$FORWARD_TCP_MAPPINGS"
+            elif [ -n "$FORWARD_UDP_MAPPINGS" ]; then
+                FORWARD_MAPPINGS="$FORWARD_UDP_MAPPINGS"
+            else
+                print_error "No valid TCP/UDP forward mappings were provided."
+                return 1
+            fi
             ;;
         *)
             print_error "Invalid selection"
