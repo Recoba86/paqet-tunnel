@@ -3778,7 +3778,7 @@ apply_auto_tune_to_config_file() {
         return 1
     fi
 
-    if ! grep -q 'protocol: "kcp"' "$config_file" 2>/dev/null; then
+    if ! grep -Eq '^[[:space:]]*protocol:[[:space:]]*"?kcp"?([[:space:]]*#.*)?$' "$config_file" 2>/dev/null; then
         return 1
     fi
 
