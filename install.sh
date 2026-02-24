@@ -3756,6 +3756,19 @@ upsert_kcp_scalar_value() {
     fi
 }
 
+remove_legacy_kcp_alias_keys() {
+    local config_file="$1"
+
+    # Remove legacy/alternate KCP key names that paqet does not use anymore.
+    # Keeping only canonical keys avoids confusing "duplicate" values in configs.
+    sed -i \
+        -e '/^[[:space:]]*snd_wnd:[[:space:]]*/d' \
+        -e '/^[[:space:]]*rcv_wnd:[[:space:]]*/d' \
+        -e '/^[[:space:]]*data_shard:[[:space:]]*/d' \
+        -e '/^[[:space:]]*parity_shard:[[:space:]]*/d' \
+        "$config_file"
+}
+
 apply_auto_tune_to_config_file() {
     local config_file="$1"
 
@@ -3788,6 +3801,7 @@ apply_auto_tune_to_config_file() {
     upsert_kcp_scalar_value "$config_file" "streambuf" "$AUTO_TUNE_STREAMBUF" "bare"
     upsert_kcp_scalar_value "$config_file" "dshard" "10" "bare"
     upsert_kcp_scalar_value "$config_file" "pshard" "3" "bare"
+    remove_legacy_kcp_alias_keys "$config_file"
 
     return 0
 }
