@@ -676,6 +676,7 @@ get_tunnel_configs() {
     for f in "$PAQET_DIR"/config-*.yaml; do
         [ -f "$f" ] && echo "$f"
     done
+    return 0
 }
 
 # Get ALL config files including server configs (for status/uninstall)
@@ -686,6 +687,7 @@ get_all_configs() {
     for f in "$PAQET_DIR"/config-*.yaml; do
         [ -f "$f" ] && echo "$f"
     done
+    return 0
 }
 
 # Extract tunnel name from config path
@@ -1573,10 +1575,11 @@ setup_server_b() {
     # Check port conflict
     check_port_conflict "$PAQET_PORT" || return 0
     
-    # V2Ray ports to forward (with validation)
+    # Backend service ports (informational only; not stored in paqet server config)
     echo ""
-    echo -e "${CYAN}These are the ports your V2Ray/X-UI listens on${NC}"
-    read_ports "Enter V2Ray inbound ports (comma-separated)" INBOUND_PORTS "$DEFAULT_FORWARD_PORTS"
+    echo -e "${CYAN}These are the backend service ports on Server B (V2Ray/X-UI/WireGuard/Hysteria)${NC}"
+    echo -e "${YELLOW}Informational only:${NC} this is shown in the final summary and is ${YELLOW}not${NC} written into the paqet server config."
+    read_ports "Enter backend service ports (comma-separated)" INBOUND_PORTS "$DEFAULT_FORWARD_PORTS"
     
     # Generate or input secret key
     echo ""
