@@ -318,10 +318,10 @@ transport:
     mode: "fast3"            # Aggressive retransmission
     key: "YOUR_SECRET_KEY"
     mtu: 1300                # Baseline default (try 1280–1400 as needed)
-    snd_wnd: 2048            # Large send window
-    rcv_wnd: 2048            # Large receive window
-    data_shard: 10           # FEC error correction
-    parity_shard: 3          # FEC redundancy
+    sndwnd: 2048             # Large send window
+    rcvwnd: 2048             # Large receive window
+    dshard: 10               # FEC error correction
+    pshard: 3                # FEC redundancy
 ```
 
 Then restart:
