@@ -35,6 +35,8 @@ DEFAULT_FORWARD_PORTS="9090"        # Default ports to forward (comma-separated)
 DEFAULT_KCP_MODE="fast"             # KCP mode: normal, fast, fast2, fast3
 DEFAULT_KCP_CONN="1"                # Number of parallel connections
 DEFAULT_KCP_MTU="1300"              # Baseline MTU (use maintenance menu to lower to 1280 if needed)
+DEFAULT_KCP_DSHARD="10"             # KCP FEC data shards
+DEFAULT_KCP_PSHARD="3"              # KCP FEC parity shards
 OPTIMIZE_SYSCTL_FILE="/etc/sysctl.d/99-paqet-tunnel.conf"
 
 # Colors
@@ -1639,8 +1641,8 @@ transport:
     block: "aes"
     smuxbuf: ${AUTO_TUNE_SMUXBUF}
     streambuf: ${AUTO_TUNE_STREAMBUF}
-    dshard: 10
-    pshard: 3
+    dshard: ${DEFAULT_KCP_DSHARD}
+    pshard: ${DEFAULT_KCP_PSHARD}
 EOF
     
     print_success "Configuration created"
@@ -1879,8 +1881,8 @@ transport:
     block: "aes"
     smuxbuf: ${AUTO_TUNE_SMUXBUF}
     streambuf: ${AUTO_TUNE_STREAMBUF}
-    dshard: 10
-    pshard: 3
+    dshard: ${DEFAULT_KCP_DSHARD}
+    pshard: ${DEFAULT_KCP_PSHARD}
 EOF
     
     print_success "Configuration created: $PAQET_CONFIG"
@@ -2841,7 +2843,7 @@ edit_kcp_settings() {
     echo ""
     echo -e "${YELLOW}MTU (Maximum Transmission Unit):${NC}"
     echo -e "  ${CYAN}1400-1500${NC} - Normal networks"
-    echo -e "  ${CYAN}1350${NC}      - Recommended for most cases"
+    echo -e "  ${CYAN}1300${NC}      - Current default baseline (recommended starting point)"
     echo -e "  ${CYAN}1280-1300${NC} - Restrictive networks / EOF or connection issues"
     echo -e "  ${YELLOW}Tip:${NC} If you get EOF errors, try MTU 1280 on BOTH ends of this tunnel."
     echo ""
@@ -3799,8 +3801,8 @@ apply_auto_tune_to_config_file() {
     upsert_kcp_scalar_value "$config_file" "block" "aes" "quoted"
     upsert_kcp_scalar_value "$config_file" "smuxbuf" "$AUTO_TUNE_SMUXBUF" "bare"
     upsert_kcp_scalar_value "$config_file" "streambuf" "$AUTO_TUNE_STREAMBUF" "bare"
-    upsert_kcp_scalar_value "$config_file" "dshard" "10" "bare"
-    upsert_kcp_scalar_value "$config_file" "pshard" "3" "bare"
+    upsert_kcp_scalar_value "$config_file" "dshard" "$DEFAULT_KCP_DSHARD" "bare"
+    upsert_kcp_scalar_value "$config_file" "pshard" "$DEFAULT_KCP_PSHARD" "bare"
     remove_legacy_kcp_alias_keys "$config_file"
 
     return 0
