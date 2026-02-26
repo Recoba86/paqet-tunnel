@@ -218,7 +218,7 @@ get_profile_preset_label() {
     local preset="${1:-$(get_current_profile_preset)}"
     case "$preset" in
         default) echo "Current Default (PaqX-style baseline)" ;;
-        behzad) echo "Behzad Preset (MTU/buffers/block)" ;;
+        behzad) echo "Behzad Preset (minimal: conn/mode/block/mtu)" ;;
         *) echo "Unknown ($preset)" ;;
     esac
 }
@@ -250,10 +250,13 @@ load_active_profile_preset_defaults() {
         behzad)
             PROFILE_PRESET_KCP_BLOCK="aes-128-gcm"
             PROFILE_PRESET_KCP_MTU="1150"
-            PROFILE_PRESET_TRANSPORT_TCPBUF="8192"
-            PROFILE_PRESET_TRANSPORT_UDPBUF="4096"
-            PROFILE_PRESET_PCAP_SOCKBUF_SERVER="8388608"
-            PROFILE_PRESET_PCAP_SOCKBUF_CLIENT="4194304"
+            # Match Behzad manager's common default-generated minimal KCP config style.
+            # tcpbuf/udpbuf/pcap.sockbuf are optional there and are often omitted unless
+            # the user explicitly sets them during the interactive install.
+            PROFILE_PRESET_TRANSPORT_TCPBUF=""
+            PROFILE_PRESET_TRANSPORT_UDPBUF=""
+            PROFILE_PRESET_PCAP_SOCKBUF_SERVER=""
+            PROFILE_PRESET_PCAP_SOCKBUF_CLIENT=""
             ;;
     esac
 }
