@@ -469,21 +469,47 @@ show_auto_kcp_profile() {
 apply_paqx_kernel_optimizations() {
     print_step "Applying PaqX-style kernel optimization (BBR/TFO/socket buffers)..."
 
+    # RAM-aware kernel tuning to reduce ENOBUFS/burst drops without overcommitting
+    # small VPS instances. These are generic transport-level improvements and do
+    # not change tunnel ports/IPs/config mappings.
+    calculate_auto_kcp_profile >/dev/null 2>&1 || true
+    local mem_mb="${AUTO_TUNE_MEM_MB:-0}"
+    local netdev_backlog="65536"
+    local sock_max="33554432"
+    local sock_default="16777216"
+    local tcp_buf_max="33554432"
+
+    if [ "$mem_mb" -ge 4096 ]; then
+        netdev_backlog="250000"
+        sock_max="134217728"
+        sock_default="33554432"
+        tcp_buf_max="134217728"
+    elif [ "$mem_mb" -ge 2048 ]; then
+        netdev_backlog="131072"
+        sock_max="67108864"
+        sock_default="16777216"
+        tcp_buf_max="67108864"
+    fi
+
     mkdir -p /etc/sysctl.d
-    cat > "$OPTIMIZE_SYSCTL_FILE" << 'EOF'
+    cat > "$OPTIMIZE_SYSCTL_FILE" << EOF
 # paqet-tunnel kernel optimizations (PaqX-style) - safe to remove
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 net.ipv4.tcp_fastopen=3
 fs.file-max=1000000
-net.core.rmem_max=33554432
-net.core.wmem_max=33554432
-net.core.rmem_default=16777216
-net.core.wmem_default=16777216
+net.core.netdev_max_backlog=${netdev_backlog}
+net.core.rmem_max=${sock_max}
+net.core.wmem_max=${sock_max}
+net.core.rmem_default=${sock_default}
+net.core.wmem_default=${sock_default}
+net.ipv4.tcp_rmem=4096 87380 ${tcp_buf_max}
+net.ipv4.tcp_wmem=4096 65536 ${tcp_buf_max}
 EOF
 
     if sysctl --system >/dev/null 2>&1; then
         print_success "Kernel optimization applied via $OPTIMIZE_SYSCTL_FILE"
+        print_info "Kernel burst profile: RAM=${mem_mb}MB backlog=${netdev_backlog} sockmax=${sock_max}"
     else
         print_warning "sysctl reload reported an issue (file was still written to $OPTIMIZE_SYSCTL_FILE)"
     fi
