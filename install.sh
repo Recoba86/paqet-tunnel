@@ -4741,9 +4741,11 @@ rollback_paqet_core_menu() {
 core_management_menu() {
     while true; do
         print_banner
-        echo -e "${YELLOW}Core Management${NC}"
+        echo -e "${YELLOW}Core & Profile Management${NC}"
         echo ""
         show_core_management_status
+        echo ""
+        echo -e "${CYAN}Profile apply updates tuning fields only and keeps ports/IP addresses unchanged.${NC}"
         echo ""
         echo -e "  ${CYAN}1)${NC} Switch Core -> Official (hanselime/paqet)"
         echo -e "  ${CYAN}2)${NC} Switch Core -> Behzad Optimized (PaqetOptimized)"
@@ -4751,6 +4753,8 @@ core_management_menu() {
         echo -e "  ${CYAN}4)${NC} Set Profile Preset -> Default"
         echo -e "  ${CYAN}5)${NC} Set Profile Preset -> Behzad"
         echo -e "  ${CYAN}6)${NC} Apply Active Profile Preset to Existing Configs"
+        echo -e "  ${CYAN}7)${NC} View Active KCP Profile Preview (read-only)"
+        echo -e "  ${CYAN}8)${NC} Show Effective Port/Profile Defaults"
         echo -e "  ${CYAN}0)${NC} Back"
         echo ""
         read -p "Choice: " core_choice < /dev/tty
@@ -4762,6 +4766,8 @@ core_management_menu() {
             4) set_profile_preset_interactive "default" ;;
             5) set_profile_preset_interactive "behzad" ;;
             6) apply_active_profile_preset_existing_configs ;;
+            7) view_current_auto_profile ;;
+            8) show_port_config ;;
             0) return 0 ;;
             *) print_error "Invalid choice" ;;
         esac
@@ -5028,7 +5034,7 @@ updates_menu() {
 
         echo -e "  ${CYAN}1)${NC} Check/Update Installer Script"
         echo -e "  ${CYAN}2)${NC} Update paqet Core (binary)"
-        echo -e "  ${CYAN}3)${NC} Core Management (provider/profile/rollback)"
+        echo -e "  ${CYAN}3)${NC} Core & Profile Management"
         echo -e "  ${CYAN}0)${NC} Back"
         echo ""
         read -p "Choice: " upd_choice < /dev/tty
@@ -5049,12 +5055,12 @@ updates_menu() {
 
 view_current_auto_profile() {
     print_banner
-    echo -e "${YELLOW}Current Auto KCP Profile (Read-only)${NC}"
+    echo -e "${YELLOW}Active KCP Profile Preview (Read-only)${NC}"
     echo ""
     calculate_auto_kcp_profile
     show_auto_kcp_profile
-    echo -e "${CYAN}No changes were applied. This only shows the computed profile for this server.${NC}"
-    echo -e "${CYAN}Use Maintenance -> k to apply this profile to existing configs.${NC}"
+    echo -e "${CYAN}No changes were applied. This only shows the effective KCP profile for this server.${NC}"
+    echo -e "${CYAN}To apply it to existing configs, use: Updates -> Core & Profile Management -> Apply Active Profile Preset to Existing Configs.${NC}"
     echo ""
 }
 
@@ -5215,10 +5221,7 @@ main() {
         echo -e "  ${CYAN}7)${NC} Test Connection"
         echo ""
         echo -e "  ${GREEN}── Maintenance ──${NC}"
-        echo -e "  ${CYAN}8)${NC} Updates (installer + core)"
-        echo -e "  ${CYAN}k)${NC} Apply Auto KCP Tuning (existing configs)"
-        echo -e "  ${CYAN}p)${NC} View Current Auto Profile"
-        echo -e "  ${CYAN}9)${NC} Show Port Defaults"
+        echo -e "  ${CYAN}8)${NC} Updates / Core / Profiles"
         echo -e "  ${CYAN}a)${NC} Automatic Reset (scheduled restart)"
         echo -e "  ${CYAN}d)${NC} Connection Protection & MTU Tuning (fix fake RST/disconnects)"
         echo -e "  ${CYAN}f)${NC} IPTables Port Forwarding (relay/NAT)"
@@ -5244,9 +5247,6 @@ main() {
             7) test_connection ;;
             8) updates_menu ;;
             [Bb]) update_paqet_core ;;
-            [Kk]) apply_auto_tune_existing_configs ;;
-            [Pp]) view_current_auto_profile ;;
-            9) show_port_config ;;
             [Aa]) auto_reset_menu ;;
             [Dd]) apply_connection_protection ;;
             [Ff]) iptables_port_forwarding_menu ;;
