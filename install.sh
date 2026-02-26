@@ -361,6 +361,10 @@ calculate_auto_kcp_profile() {
         return 0
     fi
 
+    calculate_paqx_auto_kcp_profile
+}
+
+calculate_paqx_auto_kcp_profile() {
     AUTO_TUNE_MEM_MB=$(detect_total_mem_mb)
     AUTO_TUNE_CPU_CORES=$(detect_cpu_cores)
 
@@ -386,6 +390,8 @@ calculate_auto_kcp_profile() {
     else
         AUTO_TUNE_CONN="$DEFAULT_KCP_CONN"
     fi
+
+    return 0
 }
 
 show_auto_kcp_profile() {
@@ -4103,7 +4109,8 @@ upsert_transport_conn_value() {
     if grep -Eq '^[[:space:]]*conn:[[:space:]]*[0-9]+' "$config_file"; then
         sed -i "s/^[[:space:]]*conn:[[:space:]]*[0-9][0-9]*/  conn: ${conn_value}/" "$config_file"
     else
-        sed -i "/^[[:space:]]*protocol:[[:space:]]*\"kcp\"/a\\  conn: ${conn_value}" "$config_file"
+        # Accept quoted or unquoted `protocol: kcp` (users may manually edit YAML style).
+        sed -i "/^[[:space:]]*protocol:[[:space:]]*\"\\?kcp\"\\?\\([[:space:]]*#.*\\)\\?$/a\\  conn: ${conn_value}" "$config_file"
     fi
 }
 
@@ -4381,11 +4388,13 @@ apply_profile_preset_to_config_file() {
     upsert_kcp_scalar_value "$config_file" "mode" "$DEFAULT_KCP_MODE" "quoted"
 
     if [ "$PROFILE_PRESET_NAME" = "behzad" ]; then
-        upsert_transport_conn_value "$config_file" "$(get_effective_profile_conn_value)"
+        upsert_transport_conn_value "$config_file" "4"
         remove_paqx_kcp_tuning_keys "$config_file"
     else
-        calculate_auto_kcp_profile
-        upsert_transport_conn_value "$config_file" "$(get_effective_profile_conn_value)"
+        # Apply the PaqX auto-tune profile deterministically for the default preset,
+        # even if the current active preset was changed just before this call.
+        calculate_paqx_auto_kcp_profile
+        upsert_transport_conn_value "$config_file" "$AUTO_TUNE_CONN"
         upsert_kcp_scalar_value "$config_file" "nodelay" "1" "bare"
         upsert_kcp_scalar_value "$config_file" "interval" "10" "bare"
         upsert_kcp_scalar_value "$config_file" "resend" "2" "bare"
