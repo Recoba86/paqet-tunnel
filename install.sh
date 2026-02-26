@@ -478,17 +478,26 @@ apply_paqx_kernel_optimizations() {
     local sock_max="33554432"
     local sock_default="16777216"
     local tcp_buf_max="33554432"
+    local udp_mem_triplet="32768 49152 65536"
+    local udp_min="16384"
+    local optmem_max="8388608"
 
     if [ "$mem_mb" -ge 4096 ]; then
         netdev_backlog="250000"
         sock_max="134217728"
         sock_default="33554432"
         tcp_buf_max="134217728"
+        udp_mem_triplet="90219 120292 180438"
+        udp_min="65536"
+        optmem_max="25165824"
     elif [ "$mem_mb" -ge 2048 ]; then
         netdev_backlog="131072"
         sock_max="67108864"
         sock_default="16777216"
         tcp_buf_max="67108864"
+        udp_mem_triplet="65536 98304 131072"
+        udp_min="65536"
+        optmem_max="16777216"
     fi
 
     mkdir -p /etc/sysctl.d
@@ -499,17 +508,21 @@ net.ipv4.tcp_congestion_control=bbr
 net.ipv4.tcp_fastopen=3
 fs.file-max=1000000
 net.core.netdev_max_backlog=${netdev_backlog}
+net.core.optmem_max=${optmem_max}
 net.core.rmem_max=${sock_max}
 net.core.wmem_max=${sock_max}
 net.core.rmem_default=${sock_default}
 net.core.wmem_default=${sock_default}
 net.ipv4.tcp_rmem=4096 87380 ${tcp_buf_max}
 net.ipv4.tcp_wmem=4096 65536 ${tcp_buf_max}
+net.ipv4.udp_mem=${udp_mem_triplet}
+net.ipv4.udp_rmem_min=${udp_min}
+net.ipv4.udp_wmem_min=${udp_min}
 EOF
 
     if sysctl --system >/dev/null 2>&1; then
         print_success "Kernel optimization applied via $OPTIMIZE_SYSCTL_FILE"
-        print_info "Kernel burst profile: RAM=${mem_mb}MB backlog=${netdev_backlog} sockmax=${sock_max}"
+        print_info "Kernel burst profile: RAM=${mem_mb}MB backlog=${netdev_backlog} sockmax=${sock_max} udp_mem='${udp_mem_triplet}'"
     else
         print_warning "sysctl reload reported an issue (file was still written to $OPTIMIZE_SYSCTL_FILE)"
     fi
