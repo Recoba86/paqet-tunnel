@@ -22,8 +22,14 @@ AUTO_RESET_SCRIPT="$PAQET_DIR/auto-reset.sh"
 AUTO_RESET_SERVICE="paqet-auto-reset"
 AUTO_RESET_TIMER="paqet-auto-reset"
 GITHUB_REPO="hanselime/paqet"
+OPTIMIZED_CORE_RELEASE_REPO="behzadea12/Paqet-Tunnel-Manager"
+OPTIMIZED_CORE_RELEASE_TAG="PaqetOptimized"
 INSTALLER_REPO="Recoba86/paqet-tunnel"
 INSTALLER_CMD="/usr/local/bin/paqet-tunnel"
+CORE_PROVIDER_META="$PAQET_DIR/core-provider.env"
+CORE_PROFILE_META="$PAQET_DIR/core-profile.env"
+DEFAULT_CORE_PROVIDER="official"
+DEFAULT_CORE_PROFILE_PRESET="default"
 DONATE_TON="UQCriHkMUa6h9oN059tyC23T13OsQhGGM3hUS2S4IYRBZgvx"
 DONATE_USDT_BEP20="0x71F41696c60C4693305e67eE3Baa650a4E3dA796"
 
@@ -93,6 +99,163 @@ print_warning() { echo -e "${YELLOW}[!]${NC} $1"; }
 print_info() { echo -e "${CYAN}[i]${NC} $1"; }
 
 #===============================================================================
+# Core Provider + Profile Preset Metadata
+#===============================================================================
+
+PROFILE_PRESET_NAME="$DEFAULT_CORE_PROFILE_PRESET"
+PROFILE_PRESET_LABEL="Current Default (PaqX-style)"
+PROFILE_PRESET_KCP_BLOCK="aes"
+PROFILE_PRESET_KCP_MTU="$DEFAULT_KCP_MTU"
+PROFILE_PRESET_TRANSPORT_TCPBUF=""
+PROFILE_PRESET_TRANSPORT_UDPBUF=""
+PROFILE_PRESET_PCAP_SOCKBUF_SERVER=""
+PROFILE_PRESET_PCAP_SOCKBUF_CLIENT=""
+
+get_current_core_provider() {
+    if [ -n "${PAQET_CORE_PROVIDER_OVERRIDE:-}" ]; then
+        case "$PAQET_CORE_PROVIDER_OVERRIDE" in
+            official|behzad-optimized)
+                echo "$PAQET_CORE_PROVIDER_OVERRIDE"
+                return 0
+                ;;
+        esac
+    fi
+
+    local provider="$DEFAULT_CORE_PROVIDER"
+    if [ -f "$CORE_PROVIDER_META" ]; then
+        local meta_provider=""
+        meta_provider=$(grep '^CORE_PROVIDER=' "$CORE_PROVIDER_META" 2>/dev/null | head -1 | cut -d'"' -f2)
+        [ -n "$meta_provider" ] && provider="$meta_provider"
+    fi
+    case "$provider" in
+        official|behzad-optimized) ;;
+        *) provider="$DEFAULT_CORE_PROVIDER" ;;
+    esac
+    echo "$provider"
+}
+
+get_core_provider_label() {
+    local provider="${1:-$(get_current_core_provider)}"
+    case "$provider" in
+        official) echo "Official (hanselime/paqet)" ;;
+        behzad-optimized) echo "Behzad Optimized (PaqetOptimized)" ;;
+        *) echo "Unknown ($provider)" ;;
+    esac
+}
+
+set_current_core_provider() {
+    local provider="$1"
+    mkdir -p "$PAQET_DIR"
+    cat > "$CORE_PROVIDER_META" << EOF
+# paqet-tunnel core provider metadata
+CORE_PROVIDER="${provider}"
+UPDATED_AT="$(date -Iseconds 2>/dev/null || date)"
+EOF
+}
+
+get_current_profile_preset() {
+    local preset="$DEFAULT_CORE_PROFILE_PRESET"
+    if [ -f "$CORE_PROFILE_META" ]; then
+        local meta_preset=""
+        meta_preset=$(grep '^CORE_PROFILE_PRESET=' "$CORE_PROFILE_META" 2>/dev/null | head -1 | cut -d'"' -f2)
+        [ -n "$meta_preset" ] && preset="$meta_preset"
+    fi
+    case "$preset" in
+        default|behzad) ;;
+        *) preset="$DEFAULT_CORE_PROFILE_PRESET" ;;
+    esac
+    echo "$preset"
+}
+
+get_profile_preset_label() {
+    local preset="${1:-$(get_current_profile_preset)}"
+    case "$preset" in
+        default) echo "Current Default (PaqX-style baseline)" ;;
+        behzad) echo "Behzad Preset (MTU/buffers/block)" ;;
+        *) echo "Unknown ($preset)" ;;
+    esac
+}
+
+set_current_profile_preset() {
+    local preset="$1"
+    mkdir -p "$PAQET_DIR"
+    cat > "$CORE_PROFILE_META" << EOF
+# paqet-tunnel core/profile preset metadata
+CORE_PROFILE_PRESET="${preset}"
+UPDATED_AT="$(date -Iseconds 2>/dev/null || date)"
+EOF
+}
+
+load_active_profile_preset_defaults() {
+    local preset="${1:-}"
+    [ -z "$preset" ] && preset=$(get_current_profile_preset)
+
+    PROFILE_PRESET_NAME="$preset"
+    PROFILE_PRESET_LABEL="$(get_profile_preset_label "$preset")"
+    PROFILE_PRESET_KCP_BLOCK="aes"
+    PROFILE_PRESET_KCP_MTU="$DEFAULT_KCP_MTU"
+    PROFILE_PRESET_TRANSPORT_TCPBUF=""
+    PROFILE_PRESET_TRANSPORT_UDPBUF=""
+    PROFILE_PRESET_PCAP_SOCKBUF_SERVER=""
+    PROFILE_PRESET_PCAP_SOCKBUF_CLIENT=""
+
+    case "$preset" in
+        behzad)
+            PROFILE_PRESET_KCP_BLOCK="aes-128-gcm"
+            PROFILE_PRESET_KCP_MTU="1150"
+            PROFILE_PRESET_TRANSPORT_TCPBUF="8192"
+            PROFILE_PRESET_TRANSPORT_UDPBUF="4096"
+            PROFILE_PRESET_PCAP_SOCKBUF_SERVER="8388608"
+            PROFILE_PRESET_PCAP_SOCKBUF_CLIENT="4194304"
+            ;;
+    esac
+}
+
+build_profile_transport_buffer_fragment() {
+    local varname="$1"
+    load_active_profile_preset_defaults
+
+    local fragment=""
+    [ -n "$PROFILE_PRESET_TRANSPORT_TCPBUF" ] && fragment="${fragment}
+  tcpbuf: ${PROFILE_PRESET_TRANSPORT_TCPBUF}"
+    [ -n "$PROFILE_PRESET_TRANSPORT_UDPBUF" ] && fragment="${fragment}
+  udpbuf: ${PROFILE_PRESET_TRANSPORT_UDPBUF}"
+
+    printf -v "$varname" '%s' "$fragment"
+}
+
+build_profile_network_pcap_fragment() {
+    local role="$1"   # server or client
+    local varname="$2"
+    load_active_profile_preset_defaults
+
+    local sockbuf=""
+    if [ "$role" = "server" ]; then
+        sockbuf="$PROFILE_PRESET_PCAP_SOCKBUF_SERVER"
+    else
+        sockbuf="$PROFILE_PRESET_PCAP_SOCKBUF_CLIENT"
+    fi
+
+    local fragment=""
+    if [ -n "$sockbuf" ]; then
+        fragment="  pcap:
+    sockbuf: ${sockbuf}"
+    fi
+
+    printf -v "$varname" '%s' "$fragment"
+}
+
+get_effective_profile_kcp_block() {
+    load_active_profile_preset_defaults
+    echo "$PROFILE_PRESET_KCP_BLOCK"
+}
+
+get_effective_profile_kcp_mtu() {
+    load_active_profile_preset_defaults
+    echo "$PROFILE_PRESET_KCP_MTU"
+}
+
+#===============================================================================
 # PaqX-style Auto Tuning (CPU/RAM + kernel sysctl)
 #===============================================================================
 
@@ -155,12 +318,15 @@ calculate_auto_kcp_profile() {
 }
 
 show_auto_kcp_profile() {
+    load_active_profile_preset_defaults
     echo -e "${YELLOW}Auto KCP profile (PaqX-style):${NC}"
+    echo -e "  Profile preset:    ${CYAN}${PROFILE_PRESET_NAME}${NC} (${PROFILE_PRESET_LABEL})"
     echo -e "  CPU cores:        ${CYAN}${AUTO_TUNE_CPU_CORES}${NC}"
     echo -e "  RAM:              ${CYAN}${AUTO_TUNE_MEM_MB} MB${NC}"
     echo -e "  KCP mode:         ${CYAN}${DEFAULT_KCP_MODE}${NC}"
     echo -e "  KCP conn:         ${CYAN}${AUTO_TUNE_CONN}${NC}"
-    echo -e "  KCP mtu:          ${CYAN}${DEFAULT_KCP_MTU}${NC}"
+    echo -e "  KCP mtu:          ${CYAN}${PROFILE_PRESET_KCP_MTU}${NC}"
+    echo -e "  KCP block:        ${CYAN}${PROFILE_PRESET_KCP_BLOCK}${NC}"
     echo -e "  KCP rcvwnd/sndwnd ${CYAN}${AUTO_TUNE_RCVWND}/${AUTO_TUNE_SNDWND}${NC}"
     echo ""
 }
@@ -1054,31 +1220,146 @@ install_dependencies() {
     print_success "Dependency installation completed"
 }
 
+PAQET_DL_PROVIDER=""
+PAQET_DL_VERSION=""
+PAQET_DL_ARCHIVE_NAME=""
+PAQET_DL_URL=""
+PAQET_DL_RELEASE_PAGE=""
+
+get_latest_paqet_release_tag_for_provider() {
+    local provider="${1:-$(get_current_core_provider)}"
+    case "$provider" in
+        official)
+            curl -s --max-time 10 "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>/dev/null \
+                | grep '"tag_name"' | head -1 | sed -E 's/.*"([^"]+)".*/\1/'
+            ;;
+        behzad-optimized)
+            echo "$OPTIMIZED_CORE_RELEASE_TAG"
+            ;;
+        *)
+            echo ""
+            ;;
+    esac
+}
+
+resolve_behzad_optimized_asset() {
+    local arch="$1"
+    local api_url="https://api.github.com/repos/${OPTIMIZED_CORE_RELEASE_REPO}/releases/tags/${OPTIMIZED_CORE_RELEASE_TAG}"
+    local api_json=""
+    api_json=$(curl -s --max-time 15 "$api_url" 2>/dev/null)
+
+    if [ -z "$api_json" ]; then
+        print_error "Failed to fetch optimized release metadata"
+        print_info "Check connectivity to GitHub API or try again later"
+        return 1
+    fi
+
+    local supported_arch=""
+    case "$arch" in
+        amd64|arm64) supported_arch="$arch" ;;
+        *)
+            print_error "Optimized core is not available for architecture: $arch"
+            print_info "Supported optimized core architectures currently: amd64, arm64"
+            return 1
+            ;;
+    esac
+
+    local asset_pair=""
+    asset_pair=$(printf '%s\n' "$api_json" | awk -v target_arch="$supported_arch" '
+        BEGIN { current_name="" }
+        /"name"[[:space:]]*:/ {
+            line=$0
+            sub(/^.*"name"[[:space:]]*:[[:space:]]*"/, "", line)
+            sub(/".*$/, "", line)
+            current_name=line
+        }
+        /"browser_download_url"[[:space:]]*:/ {
+            line=$0
+            sub(/^.*"browser_download_url"[[:space:]]*:[[:space:]]*"/, "", line)
+            sub(/".*$/, "", line)
+            if (current_name ~ /paqet/ && current_name ~ /tar\.gz/ && current_name ~ target_arch) {
+                print current_name "|" line
+                exit
+            }
+        }
+    ')
+
+    if [ -z "$asset_pair" ] || [[ "$asset_pair" != *"|"* ]]; then
+        print_error "Could not locate optimized core asset for architecture: $supported_arch"
+        print_info "Release page: https://github.com/${OPTIMIZED_CORE_RELEASE_REPO}/releases/tag/${OPTIMIZED_CORE_RELEASE_TAG}"
+        return 1
+    fi
+
+    PAQET_DL_PROVIDER="behzad-optimized"
+    PAQET_DL_VERSION=$(echo "$api_json" | grep '"tag_name"' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+    [ -z "$PAQET_DL_VERSION" ] && PAQET_DL_VERSION="$OPTIMIZED_CORE_RELEASE_TAG"
+    PAQET_DL_ARCHIVE_NAME="${asset_pair%%|*}"
+    PAQET_DL_URL="${asset_pair#*|}"
+    PAQET_DL_RELEASE_PAGE="https://github.com/${OPTIMIZED_CORE_RELEASE_REPO}/releases/tag/${OPTIMIZED_CORE_RELEASE_TAG}"
+    return 0
+}
+
+resolve_paqet_download_source() {
+    local provider="${1:-$(get_current_core_provider)}"
+    local arch="$2"
+    local os="${3:-linux}"
+
+    PAQET_DL_PROVIDER=""
+    PAQET_DL_VERSION=""
+    PAQET_DL_ARCHIVE_NAME=""
+    PAQET_DL_URL=""
+    PAQET_DL_RELEASE_PAGE=""
+
+    case "$provider" in
+        official)
+            local version=""
+            if [ "$PAQET_VERSION" = "latest" ]; then
+                version=$(get_latest_paqet_release_tag_for_provider official)
+                if [ -z "$version" ]; then
+                    print_warning "Failed to get latest version from GitHub"
+                    version="v1.0.0-alpha.11"  # Fallback version
+                fi
+            else
+                version="$PAQET_VERSION"
+            fi
+
+            PAQET_DL_PROVIDER="official"
+            PAQET_DL_VERSION="$version"
+            PAQET_DL_ARCHIVE_NAME="paqet-${os}-${arch}-${version}.tar.gz"
+            PAQET_DL_URL="https://github.com/${GITHUB_REPO}/releases/download/${version}/${PAQET_DL_ARCHIVE_NAME}"
+            PAQET_DL_RELEASE_PAGE="https://github.com/${GITHUB_REPO}/releases"
+            ;;
+        behzad-optimized)
+            resolve_behzad_optimized_asset "$arch" || return 1
+            ;;
+        *)
+            print_error "Unknown core provider: $provider"
+            return 1
+            ;;
+    esac
+    return 0
+}
+
 download_paqet() {
     print_step "Downloading paqet binary..."
     
     local arch=$(detect_arch)
     local os="linux"
+    local provider
+    provider=$(get_current_core_provider)
     
     mkdir -p "$PAQET_DIR"
-    
-    # Get the latest version tag
-    local version=""
-    if [ "$PAQET_VERSION" = "latest" ]; then
-        version=$(curl -s https://api.github.com/repos/${GITHUB_REPO}/releases/latest | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
-        if [ -z "$version" ]; then
-            print_warning "Failed to get latest version from GitHub"
-            version="v1.0.0-alpha.11"  # Fallback version
-        fi
-    else
-        version="$PAQET_VERSION"
+
+    if ! resolve_paqet_download_source "$provider" "$arch" "$os"; then
+        return 1
     fi
-    
-    # Construct download URL for tar.gz
-    local archive_name="paqet-${os}-${arch}-${version}.tar.gz"
-    local download_url="https://github.com/${GITHUB_REPO}/releases/download/${version}/${archive_name}"
-    
-    print_info "Downloading version: $version"
+
+    local version="$PAQET_DL_VERSION"
+    local archive_name="$PAQET_DL_ARCHIVE_NAME"
+    local download_url="$PAQET_DL_URL"
+
+    print_info "Core provider: $(get_core_provider_label "$provider")"
+    print_info "Downloading version/tag: $version"
     print_info "URL: $download_url"
     
     # Check for local file in /root/paqet first
@@ -1141,7 +1422,7 @@ download_paqet() {
             if [[ "$has_local" =~ ^[Yy]$ ]]; then
                 while true; do
                     echo -e "${YELLOW}Enter the full path to the paqet tar.gz file. Press Enter to cancel:${NC}"
-                    echo -e "${CYAN}Example: /root/paqet/paqet-linux-amd64-v1.0.0-alpha.11.tar.gz${NC}"
+                    echo -e "${CYAN}Example: /root/paqet/${archive_name}${NC}"
                     read -p "> " local_archive < /dev/tty
                     [ -z "$local_archive" ] && break
                     if [ -f "$local_archive" ]; then
@@ -1155,7 +1436,7 @@ download_paqet() {
                 done
             fi
             if [ "$download_success" = false ]; then
-                print_info "Please download manually from: https://github.com/${GITHUB_REPO}/releases"
+                print_info "Please download manually from: ${PAQET_DL_RELEASE_PAGE:-https://github.com/${GITHUB_REPO}/releases}"
                 print_info "Save to: $local_dir/"
                 print_info "Then run this installer again (you will return to the main menu now)."
                 return 1
@@ -1603,6 +1884,15 @@ setup_server_b() {
     
     # Create config file
     print_step "Creating configuration..."
+
+    local profile_network_pcap_fragment=""
+    local profile_transport_buf_fragment=""
+    local profile_kcp_block=""
+    local profile_kcp_mtu=""
+    build_profile_network_pcap_fragment "server" profile_network_pcap_fragment
+    build_profile_transport_buffer_fragment profile_transport_buf_fragment
+    profile_kcp_block=$(get_effective_profile_kcp_block)
+    profile_kcp_mtu=$(get_effective_profile_kcp_mtu)
     
     cat > "$PAQET_CONFIG" << EOF
 # paqet Server Configuration
@@ -1622,9 +1912,10 @@ network:
     router_mac: "${gateway_mac}"
   tcp:
     local_flag: ["PA"]
+${profile_network_pcap_fragment}
 
 transport:
-  protocol: "kcp"
+  protocol: "kcp"${profile_transport_buf_fragment}
   conn: ${AUTO_TUNE_CONN}
   kcp:
     mode: "${DEFAULT_KCP_MODE}"
@@ -1635,10 +1926,10 @@ transport:
     wdelay: false
     acknodelay: true
     key: "${secret_key}"
-    mtu: ${DEFAULT_KCP_MTU}
+    mtu: ${profile_kcp_mtu}
     rcvwnd: ${AUTO_TUNE_RCVWND}
     sndwnd: ${AUTO_TUNE_SNDWND}
-    block: "aes"
+    block: "${profile_kcp_block}"
     smuxbuf: ${AUTO_TUNE_SMUXBUF}
     streambuf: ${AUTO_TUNE_STREAMBUF}
     dshard: ${DEFAULT_KCP_DSHARD}
@@ -1838,6 +2129,15 @@ setup_server_a() {
         print_error "Failed to build forward configuration from mappings: $FORWARD_MAPPINGS"
         return 1
     fi
+
+    local profile_network_pcap_fragment=""
+    local profile_transport_buf_fragment=""
+    local profile_kcp_block=""
+    local profile_kcp_mtu=""
+    build_profile_network_pcap_fragment "client" profile_network_pcap_fragment
+    build_profile_transport_buffer_fragment profile_transport_buf_fragment
+    profile_kcp_block=$(get_effective_profile_kcp_block)
+    profile_kcp_mtu=$(get_effective_profile_kcp_mtu)
     
     cat > "$PAQET_CONFIG" << EOF
 # paqet Client Configuration (Port Forwarding Mode)
@@ -1859,12 +2159,13 @@ network:
   tcp:
     local_flag: ["PA"]
     remote_flag: ["PA"]
+${profile_network_pcap_fragment}
 
 server:
   addr: "${SERVER_B_IP}:${SERVER_B_PORT}"
 
 transport:
-  protocol: "kcp"
+  protocol: "kcp"${profile_transport_buf_fragment}
   conn: ${AUTO_TUNE_CONN}
   kcp:
     mode: "${DEFAULT_KCP_MODE}"
@@ -1875,10 +2176,10 @@ transport:
     wdelay: false
     acknodelay: true
     key: "${SECRET_KEY}"
-    mtu: ${DEFAULT_KCP_MTU}
+    mtu: ${profile_kcp_mtu}
     rcvwnd: ${AUTO_TUNE_RCVWND}
     sndwnd: ${AUTO_TUNE_SNDWND}
-    block: "aes"
+    block: "${profile_kcp_block}"
     smuxbuf: ${AUTO_TUNE_SMUXBUF}
     streambuf: ${AUTO_TUNE_STREAMBUF}
     dshard: ${DEFAULT_KCP_DSHARD}
@@ -2827,6 +3128,7 @@ edit_secret_key() {
 
 edit_kcp_settings() {
     echo ""
+    load_active_profile_preset_defaults
     echo -e "${YELLOW}KCP Mode options:${NC}"
     echo -e "  ${CYAN}normal${NC}  - Balanced (default)"
     echo -e "  ${CYAN}fast${NC}    - Low latency"
@@ -2843,13 +3145,13 @@ edit_kcp_settings() {
     echo ""
     echo -e "${YELLOW}MTU (Maximum Transmission Unit):${NC}"
     echo -e "  ${CYAN}1400-1500${NC} - Normal networks"
-    echo -e "  ${CYAN}1300${NC}      - Current default baseline (recommended starting point)"
+    echo -e "  ${CYAN}${PROFILE_PRESET_KCP_MTU}${NC}      - Active profile baseline (${PROFILE_PRESET_NAME})"
     echo -e "  ${CYAN}1280-1300${NC} - Restrictive networks / EOF or connection issues"
     echo -e "  ${YELLOW}Tip:${NC} If you get EOF errors, try MTU 1280 on BOTH ends of this tunnel."
     echo ""
     
     local current_mtu=$(grep "mtu:" "$PAQET_CONFIG" | grep -oE '[0-9]+' | head -1)
-    [ -z "$current_mtu" ] && current_mtu="$DEFAULT_KCP_MTU"
+    [ -z "$current_mtu" ] && current_mtu="$PROFILE_PRESET_KCP_MTU"
     
     while true; do
         read_required "Enter MTU value, between 1280 and 1500" KCP_MTU "$current_mtu"
@@ -3786,6 +4088,8 @@ apply_auto_tune_to_config_file() {
         return 1
     fi
 
+    load_active_profile_preset_defaults
+
     upsert_transport_conn_value "$config_file" "$AUTO_TUNE_CONN"
 
     upsert_kcp_scalar_value "$config_file" "mode" "$DEFAULT_KCP_MODE" "quoted"
@@ -3795,10 +4099,10 @@ apply_auto_tune_to_config_file() {
     upsert_kcp_scalar_value "$config_file" "nocongestion" "1" "bare"
     upsert_kcp_scalar_value "$config_file" "wdelay" "false" "bare"
     upsert_kcp_scalar_value "$config_file" "acknodelay" "true" "bare"
-    upsert_kcp_scalar_value "$config_file" "mtu" "$DEFAULT_KCP_MTU" "bare"
+    upsert_kcp_scalar_value "$config_file" "mtu" "$PROFILE_PRESET_KCP_MTU" "bare"
     upsert_kcp_scalar_value "$config_file" "rcvwnd" "$AUTO_TUNE_RCVWND" "bare"
     upsert_kcp_scalar_value "$config_file" "sndwnd" "$AUTO_TUNE_SNDWND" "bare"
-    upsert_kcp_scalar_value "$config_file" "block" "aes" "quoted"
+    upsert_kcp_scalar_value "$config_file" "block" "$PROFILE_PRESET_KCP_BLOCK" "quoted"
     upsert_kcp_scalar_value "$config_file" "smuxbuf" "$AUTO_TUNE_SMUXBUF" "bare"
     upsert_kcp_scalar_value "$config_file" "streambuf" "$AUTO_TUNE_STREAMBUF" "bare"
     upsert_kcp_scalar_value "$config_file" "dshard" "$DEFAULT_KCP_DSHARD" "bare"
@@ -3828,6 +4132,7 @@ apply_auto_tune_existing_configs() {
     echo -e "  - conn / mode / mtu"
     echo -e "  - window sizes (rcvwnd/sndwnd)"
     echo -e "  - PaqX-style KCP defaults (nodelay/acknodelay/FEC/buffers)"
+    echo -e "  - MTU/block use the active profile preset baseline ($(get_current_profile_preset))"
     echo -e "  - Kernel sysctl optimization file (${OPTIMIZE_SYSCTL_FILE})"
     echo ""
     echo -e "${YELLOW}Note:${NC} Existing configs will be backed up as *.autotune.bak.<timestamp>"
@@ -3895,12 +4200,471 @@ apply_auto_tune_existing_configs() {
 }
 
 #===============================================================================
+# Profile Preset Helpers (separate from PaqX auto-tune)
+#===============================================================================
+
+upsert_transport_scalar_value() {
+    local config_file="$1"
+    local key="$2"
+    local value="$3"
+
+    if grep -Eq "^[[:space:]]*${key}:" "$config_file"; then
+        sed -i "s|^[[:space:]]*${key}:.*|  ${key}: ${value}|" "$config_file"
+    else
+        sed -i "/^[[:space:]]*transport:[[:space:]]*$/a\\  ${key}: ${value}" "$config_file"
+    fi
+}
+
+remove_transport_scalar_value() {
+    local config_file="$1"
+    local key="$2"
+    sed -i "/^[[:space:]]*${key}:[[:space:]]*/d" "$config_file"
+}
+
+upsert_or_remove_network_pcap_sockbuf() {
+    local config_file="$1"
+    local sockbuf_value="$2"
+    local tmp_file="${config_file}.pcap.$$"
+
+    awk -v sockbuf="$sockbuf_value" '
+        function print_pcap_block() {
+            print "  pcap:"
+            print "    sockbuf: " sockbuf
+        }
+        {
+            line = $0
+
+            if (!in_network && line ~ /^network:[[:space:]]*$/) {
+                in_network = 1
+                print line
+                next
+            }
+
+            if (in_network) {
+                if (in_pcap) {
+                    if (line ~ /^    /) {
+                        next
+                    }
+                    in_pcap = 0
+                }
+
+                if (line ~ /^  pcap:[[:space:]]*$/) {
+                    replaced_or_inserted = 1
+                    if (sockbuf != "") {
+                        print_pcap_block()
+                    }
+                    in_pcap = 1
+                    next
+                }
+
+                if (line ~ /^[^[:space:]]/) {
+                    if (!replaced_or_inserted && sockbuf != "") {
+                        print_pcap_block()
+                        replaced_or_inserted = 1
+                    }
+                    in_network = 0
+                    print line
+                    next
+                }
+
+                print line
+                next
+            }
+
+            print line
+        }
+        END {
+            if (in_network && !replaced_or_inserted && sockbuf != "") {
+                print_pcap_block()
+            }
+        }
+    ' "$config_file" > "$tmp_file" && mv "$tmp_file" "$config_file"
+}
+
+apply_profile_preset_to_config_file() {
+    local config_file="$1"
+    local preset="${2:-$(get_current_profile_preset)}"
+
+    if [ ! -f "$config_file" ]; then
+        return 1
+    fi
+
+    if ! grep -Eq '^[[:space:]]*protocol:[[:space:]]*"?kcp"?([[:space:]]*#.*)?$' "$config_file" 2>/dev/null; then
+        return 1
+    fi
+
+    if ! grep -Eq '^[[:space:]]*kcp:' "$config_file"; then
+        return 1
+    fi
+
+    load_active_profile_preset_defaults "$preset"
+
+    upsert_kcp_scalar_value "$config_file" "block" "$PROFILE_PRESET_KCP_BLOCK" "quoted"
+    upsert_kcp_scalar_value "$config_file" "mtu" "$PROFILE_PRESET_KCP_MTU" "bare"
+
+    if [ -n "$PROFILE_PRESET_TRANSPORT_TCPBUF" ]; then
+        upsert_transport_scalar_value "$config_file" "tcpbuf" "$PROFILE_PRESET_TRANSPORT_TCPBUF"
+    else
+        remove_transport_scalar_value "$config_file" "tcpbuf"
+    fi
+
+    if [ -n "$PROFILE_PRESET_TRANSPORT_UDPBUF" ]; then
+        upsert_transport_scalar_value "$config_file" "udpbuf" "$PROFILE_PRESET_TRANSPORT_UDPBUF"
+    else
+        remove_transport_scalar_value "$config_file" "udpbuf"
+    fi
+
+    local role=""
+    role=$(grep '^role:' "$config_file" 2>/dev/null | awk '{print $2}' | tr -d '"')
+    local pcap_sockbuf=""
+    if [ "$role" = "server" ]; then
+        pcap_sockbuf="$PROFILE_PRESET_PCAP_SOCKBUF_SERVER"
+    else
+        pcap_sockbuf="$PROFILE_PRESET_PCAP_SOCKBUF_CLIENT"
+    fi
+    upsert_or_remove_network_pcap_sockbuf "$config_file" "$pcap_sockbuf"
+
+    return 0
+}
+
+apply_active_profile_preset_existing_configs() {
+    print_banner
+    local active_preset
+    active_preset=$(get_current_profile_preset)
+    load_active_profile_preset_defaults "$active_preset"
+
+    echo -e "${YELLOW}Apply Active Profile Preset (Existing Configs)${NC}"
+    echo ""
+    echo -e "  ${YELLOW}Preset:${NC} ${CYAN}${PROFILE_PRESET_NAME}${NC} (${PROFILE_PRESET_LABEL})"
+    echo -e "  ${YELLOW}Changes:${NC}"
+    echo -e "    - KCP block: ${CYAN}${PROFILE_PRESET_KCP_BLOCK}${NC}"
+    echo -e "    - KCP MTU:   ${CYAN}${PROFILE_PRESET_KCP_MTU}${NC}"
+    if [ -n "$PROFILE_PRESET_TRANSPORT_TCPBUF" ] || [ -n "$PROFILE_PRESET_TRANSPORT_UDPBUF" ]; then
+        echo -e "    - transport.tcpbuf / udpbuf: ${CYAN}${PROFILE_PRESET_TRANSPORT_TCPBUF:-default}/${PROFILE_PRESET_TRANSPORT_UDPBUF:-default}${NC}"
+    else
+        echo -e "    - transport.tcpbuf / udpbuf: ${CYAN}removed (use paqet defaults)${NC}"
+    fi
+    if [ -n "$PROFILE_PRESET_PCAP_SOCKBUF_SERVER" ] || [ -n "$PROFILE_PRESET_PCAP_SOCKBUF_CLIENT" ]; then
+        echo -e "    - network.pcap.sockbuf: ${CYAN}role-based preset values${NC}"
+    else
+        echo -e "    - network.pcap.sockbuf: ${CYAN}removed (use paqet defaults)${NC}"
+    fi
+    echo ""
+    echo -e "${CYAN}This does NOT change CPU/RAM PaqX auto-tune windows/conn unless you run option k.${NC}"
+    echo ""
+
+    local configs
+    configs=$(get_all_configs)
+    if [ -z "$configs" ]; then
+        print_error "No paqet configurations found"
+        print_info "Run setup first"
+        return 1
+    fi
+
+    read_confirm "Apply active profile preset to all existing configs on this server?" do_apply "y"
+    [ "$do_apply" != true ] && return 0
+
+    local ts
+    ts=$(date +%s)
+    local updated=0
+    local skipped=0
+    local failed=0
+    local updated_configs=""
+
+    while IFS= read -r config_file; do
+        [ -z "$config_file" ] && continue
+
+        local name
+        name=$(get_tunnel_name "$config_file")
+        local backup_file="${config_file}.profilepreset.bak.${ts}"
+
+        if ! cp "$config_file" "$backup_file" 2>/dev/null; then
+            print_warning "Backup failed for ${name}; skipping (${config_file})"
+            failed=$((failed + 1))
+            continue
+        fi
+
+        if apply_profile_preset_to_config_file "$config_file" "$active_preset"; then
+            print_success "Applied profile preset to '${name}'"
+            updated=$((updated + 1))
+            updated_configs="${updated_configs}${config_file}
+"
+        else
+            print_warning "Skipped '${name}' (unsupported or invalid KCP config)"
+            skipped=$((skipped + 1))
+        fi
+    done <<< "$configs"
+
+    echo ""
+    print_info "Summary: updated=${updated}, skipped=${skipped}, failed=${failed}"
+
+    if [ "$updated" -gt 0 ]; then
+        echo ""
+        read_confirm "Restart paqet services now to apply profile preset changes?" do_restart "y"
+        if [ "$do_restart" = true ]; then
+            while IFS= read -r config_file; do
+                [ -z "$config_file" ] && continue
+                local service
+                service=$(get_tunnel_service "$config_file")
+                if systemctl cat "$service" >/dev/null 2>&1; then
+                    if systemctl restart "$service" >/dev/null 2>&1; then
+                        print_success "Restarted $service"
+                    else
+                        print_warning "Failed to restart $service (check logs)"
+                    fi
+                fi
+            done <<< "$updated_configs"
+        else
+            print_warning "Services not restarted. Restart them manually to apply changes."
+        fi
+    fi
+}
+
+#===============================================================================
 # Core Updater + Auto-Updater
 #===============================================================================
 
+create_paqet_core_backup() {
+    local reason="${1:-manual}"
+
+    if [ ! -f "$PAQET_BIN" ]; then
+        return 1
+    fi
+
+    local ts
+    ts=$(date +%s)
+    local backup_bin="${PAQET_BIN}.corebak.${ts}.${reason}"
+    cp "$PAQET_BIN" "$backup_bin" || return 1
+    chmod +x "$backup_bin" 2>/dev/null || true
+
+    local current_provider
+    current_provider=$(get_current_core_provider)
+    cat > "${backup_bin}.meta" << EOF
+# paqet core binary backup metadata
+CORE_PROVIDER="${current_provider}"
+BACKUP_REASON="${reason}"
+CREATED_AT="$(date -Iseconds 2>/dev/null || date)"
+EOF
+
+    echo "$backup_bin"
+    return 0
+}
+
+list_paqet_core_backups() {
+    find "$PAQET_DIR" -maxdepth 1 -type f \( -name 'paqet.corebak.*' -o -name 'paqet.bak.*' \) 2>/dev/null \
+        | while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            printf '%s\t%s\n' "$(stat -c %Y "$f" 2>/dev/null || echo 0)" "$f"
+        done \
+        | sort -rn | cut -f2-
+    return 0
+}
+
+restore_paqet_core_backup_file() {
+    local backup_file="$1"
+    [ -f "$backup_file" ] || { print_error "Backup file not found: $backup_file"; return 1; }
+
+    cp "$backup_file" "$PAQET_BIN" || return 1
+    chmod +x "$PAQET_BIN" 2>/dev/null || true
+
+    local meta_file="${backup_file}.meta"
+    if [ -f "$meta_file" ]; then
+        local backup_provider=""
+        backup_provider=$(grep '^CORE_PROVIDER=' "$meta_file" 2>/dev/null | head -1 | cut -d'"' -f2)
+        if [ -n "$backup_provider" ]; then
+            read_confirm "Restore core provider metadata to '${backup_provider}' too?" restore_meta "y"
+            if [ "$restore_meta" = true ]; then
+                set_current_core_provider "$backup_provider"
+                print_info "Core provider metadata restored to: $(get_core_provider_label "$backup_provider")"
+            fi
+        fi
+    fi
+
+    return 0
+}
+
+show_core_management_status() {
+    local provider
+    provider=$(get_current_core_provider)
+    local profile_preset
+    profile_preset=$(get_current_profile_preset)
+    local core_ver
+    core_ver=$(get_installed_paqet_version_text)
+
+    echo -e "  ${YELLOW}Core Provider:${NC}  ${CYAN}$(get_core_provider_label "$provider")${NC}"
+    echo -e "  ${YELLOW}Core Version:${NC}   ${CYAN}${core_ver}${NC}"
+    echo -e "  ${YELLOW}Profile Preset:${NC} ${CYAN}${profile_preset}${NC} ($(get_profile_preset_label "$profile_preset"))"
+}
+
+switch_paqet_core_provider() {
+    local target_provider="$1"
+    local target_label
+    target_label=$(get_core_provider_label "$target_provider")
+    local current_provider
+    current_provider=$(get_current_core_provider)
+
+    print_banner
+    echo -e "${YELLOW}Switch paqet Core Provider${NC}"
+    echo ""
+    echo -e "  ${YELLOW}Current:${NC} ${CYAN}$(get_core_provider_label "$current_provider")${NC}"
+    echo -e "  ${YELLOW}Target:${NC}  ${CYAN}${target_label}${NC}"
+    echo ""
+    echo -e "${CYAN}This replaces only the paqet binary (core). Your configs/services remain the same.${NC}"
+    echo -e "${CYAN}A backup of the current binary will be created before switching.${NC}"
+    echo ""
+
+    read_confirm "Switch core provider now and restart services?" do_switch "y"
+    [ "$do_switch" != true ] && return 0
+
+    local backup_bin=""
+    if [ -f "$PAQET_BIN" ]; then
+        backup_bin=$(create_paqet_core_backup "switch-${target_provider}") || {
+            print_error "Failed to create core backup"
+            return 1
+        }
+        print_info "Backup created: $backup_bin"
+    else
+        print_info "No existing paqet binary found; provider will be set after install"
+    fi
+
+    local old_provider="$current_provider"
+    PAQET_CORE_PROVIDER_OVERRIDE="$target_provider"
+
+    if download_paqet; then
+        unset PAQET_CORE_PROVIDER_OVERRIDE
+        set_current_core_provider "$target_provider"
+        restart_paqet_services_after_core_update
+        print_success "Core provider switched to: $(get_core_provider_label "$target_provider")"
+        return 0
+    fi
+
+    unset PAQET_CORE_PROVIDER_OVERRIDE
+    print_error "Core provider switch failed"
+    if [ -n "$backup_bin" ] && [ -f "$backup_bin" ]; then
+        if restore_paqet_core_backup_file "$backup_bin"; then
+            print_warning "Restored previous paqet binary from backup"
+        fi
+    fi
+    set_current_core_provider "$old_provider"
+    return 1
+}
+
+set_profile_preset_interactive() {
+    local target_preset="$1"
+    load_active_profile_preset_defaults "$target_preset"
+
+    print_banner
+    echo -e "${YELLOW}Switch Profile Preset${NC}"
+    echo ""
+    echo -e "  ${YELLOW}Target preset:${NC} ${CYAN}${PROFILE_PRESET_NAME}${NC} (${PROFILE_PRESET_LABEL})"
+    echo -e "  ${YELLOW}KCP block:${NC}     ${CYAN}${PROFILE_PRESET_KCP_BLOCK}${NC}"
+    echo -e "  ${YELLOW}KCP MTU:${NC}       ${CYAN}${PROFILE_PRESET_KCP_MTU}${NC}"
+    echo -e "  ${YELLOW}tcpbuf/udpbuf:${NC} ${CYAN}${PROFILE_PRESET_TRANSPORT_TCPBUF:-default}/${PROFILE_PRESET_TRANSPORT_UDPBUF:-default}${NC}"
+    if [ -n "$PROFILE_PRESET_PCAP_SOCKBUF_SERVER" ] || [ -n "$PROFILE_PRESET_PCAP_SOCKBUF_CLIENT" ]; then
+        echo -e "  ${YELLOW}pcap.sockbuf:${NC}  ${CYAN}server=${PROFILE_PRESET_PCAP_SOCKBUF_SERVER}, client=${PROFILE_PRESET_PCAP_SOCKBUF_CLIENT}${NC}"
+    else
+        echo -e "  ${YELLOW}pcap.sockbuf:${NC}  ${CYAN}use paqet defaults${NC}"
+    fi
+    echo ""
+    echo -e "${CYAN}This only changes the active profile preset metadata for future setups.${NC}"
+    echo -e "${CYAN}Use the apply option to retrofit the preset to existing configs.${NC}"
+    echo ""
+
+    read_confirm "Set active profile preset to '${target_preset}'?" do_set "y"
+    [ "$do_set" != true ] && return 0
+
+    set_current_profile_preset "$target_preset"
+    print_success "Active profile preset is now: $target_preset"
+
+    echo ""
+    read_confirm "Apply this profile preset to existing configs now?" do_apply_now "n"
+    if [ "$do_apply_now" = true ]; then
+        apply_active_profile_preset_existing_configs
+    fi
+}
+
+rollback_paqet_core_menu() {
+    print_banner
+    echo -e "${YELLOW}Rollback paqet Core Binary${NC}"
+    echo ""
+
+    local backups
+    backups=$(list_paqet_core_backups)
+    if [ -z "$backups" ]; then
+        print_error "No paqet core backups found"
+        return 1
+    fi
+
+    local idx=0
+    local backup_array=()
+    while IFS= read -r b; do
+        [ -z "$b" ] && continue
+        idx=$((idx + 1))
+        backup_array+=("$b")
+        echo -e "  ${CYAN}${idx})${NC} ${YELLOW}$b${NC}"
+    done <<< "$backups"
+
+    echo ""
+    read -p "Select backup to restore (0 to cancel): " rollback_choice < /dev/tty
+    if [ "$rollback_choice" = "0" ]; then
+        return 0
+    fi
+    if ! [[ "$rollback_choice" =~ ^[0-9]+$ ]] || [ "$rollback_choice" -lt 1 ] || [ "$rollback_choice" -gt "${#backup_array[@]}" ]; then
+        print_error "Invalid choice"
+        return 1
+    fi
+
+    local selected_backup="${backup_array[$((rollback_choice - 1))]}"
+    echo ""
+    read_confirm "Restore selected backup and restart services?" do_restore "y"
+    [ "$do_restore" != true ] && return 0
+
+    if restore_paqet_core_backup_file "$selected_backup"; then
+        restart_paqet_services_after_core_update
+        print_success "Core rollback completed"
+        return 0
+    fi
+
+    print_error "Core rollback failed"
+    return 1
+}
+
+core_management_menu() {
+    while true; do
+        print_banner
+        echo -e "${YELLOW}Core Management${NC}"
+        echo ""
+        show_core_management_status
+        echo ""
+        echo -e "  ${CYAN}1)${NC} Switch Core -> Official (hanselime/paqet)"
+        echo -e "  ${CYAN}2)${NC} Switch Core -> Behzad Optimized (PaqetOptimized)"
+        echo -e "  ${CYAN}3)${NC} Rollback Core Binary from Backup"
+        echo -e "  ${CYAN}4)${NC} Set Profile Preset -> Default"
+        echo -e "  ${CYAN}5)${NC} Set Profile Preset -> Behzad"
+        echo -e "  ${CYAN}6)${NC} Apply Active Profile Preset to Existing Configs"
+        echo -e "  ${CYAN}0)${NC} Back"
+        echo ""
+        read -p "Choice: " core_choice < /dev/tty
+
+        case "$core_choice" in
+            1) switch_paqet_core_provider "official" ;;
+            2) switch_paqet_core_provider "behzad-optimized" ;;
+            3) rollback_paqet_core_menu ;;
+            4) set_profile_preset_interactive "default" ;;
+            5) set_profile_preset_interactive "behzad" ;;
+            6) apply_active_profile_preset_existing_configs ;;
+            0) return 0 ;;
+            *) print_error "Invalid choice" ;;
+        esac
+
+        echo ""
+        echo -e "${YELLOW}Press Enter to continue...${NC}"
+        read < /dev/tty
+    done
+}
+
 get_latest_paqet_release_tag() {
-    curl -s --max-time 10 "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>/dev/null \
-        | grep '"tag_name"' | head -1 | sed -E 's/.*"([^"]+)".*/\1/'
+    get_latest_paqet_release_tag_for_provider "official"
 }
 
 get_installed_paqet_version_text() {
@@ -3962,28 +4726,34 @@ update_paqet_core() {
     echo -e "${YELLOW}Update paqet Core Binary${NC}"
     echo ""
 
+    local provider
+    provider=$(get_current_core_provider)
+    print_info "Core provider: ${CYAN}$(get_core_provider_label "$provider")${NC}"
+
     local installed_ver
     installed_ver=$(get_installed_paqet_version_text)
     print_info "Installed core: ${CYAN}${installed_ver}${NC}"
 
     local latest_tag
-    latest_tag=$(get_latest_paqet_release_tag)
+    latest_tag=$(get_latest_paqet_release_tag_for_provider "$provider")
     if [ -n "$latest_tag" ]; then
-        print_info "Latest GitHub release: ${CYAN}${latest_tag}${NC}"
+        print_info "Latest provider release/tag: ${CYAN}${latest_tag}${NC}"
     else
         print_warning "Could not fetch latest release tag (network may be restricted)"
     fi
     echo ""
 
-    read_confirm "Download latest paqet core and restart services?" do_core_update "y"
+    read_confirm "Download latest core for current provider and restart services?" do_core_update "y"
     [ "$do_core_update" != true ] && return 0
 
     mkdir -p "$PAQET_DIR"
 
     local backup_bin=""
     if [ -f "$PAQET_BIN" ]; then
-        backup_bin="${PAQET_BIN}.bak.$(date +%s)"
-        cp "$PAQET_BIN" "$backup_bin"
+        backup_bin=$(create_paqet_core_backup "update-${provider}") || {
+            print_error "Failed to create core backup"
+            return 1
+        }
         print_info "Backup created: $backup_bin"
     fi
 
@@ -4137,12 +4907,19 @@ updates_menu() {
 
         local core_ver
         core_ver=$(get_installed_paqet_version_text)
+        local core_provider
+        core_provider=$(get_current_core_provider)
+        local profile_preset
+        profile_preset=$(get_current_profile_preset)
         echo -e "  ${YELLOW}Installer:${NC}   ${CYAN}${INSTALLER_VERSION}${NC}"
         echo -e "  ${YELLOW}paqet Core:${NC}  ${CYAN}${core_ver}${NC}"
+        echo -e "  ${YELLOW}Provider:${NC}    ${CYAN}$(get_core_provider_label "$core_provider")${NC}"
+        echo -e "  ${YELLOW}Profile:${NC}     ${CYAN}${profile_preset}${NC} ($(get_profile_preset_label "$profile_preset"))"
         echo ""
 
         echo -e "  ${CYAN}1)${NC} Check/Update Installer Script"
         echo -e "  ${CYAN}2)${NC} Update paqet Core (binary)"
+        echo -e "  ${CYAN}3)${NC} Core Management (provider/profile/rollback)"
         echo -e "  ${CYAN}0)${NC} Back"
         echo ""
         read -p "Choice: " upd_choice < /dev/tty
@@ -4150,6 +4927,7 @@ updates_menu() {
         case $upd_choice in
             1) check_for_updates ;;
             2) update_paqet_core ;;
+            3) core_management_menu ;;
             0) return 0 ;;
             *) print_error "Invalid choice" ;;
         esac
@@ -4172,18 +4950,26 @@ view_current_auto_profile() {
 }
 
 show_port_config() {
+    load_active_profile_preset_defaults
     echo ""
     echo -e "${MAGENTA}════════════════════════════════════════════════════════════${NC}"
     echo -e "${MAGENTA}              Current Port Configuration                    ${NC}"
     echo -e "${MAGENTA}════════════════════════════════════════════════════════════${NC}"
     echo -e "  ${YELLOW}Default paqet port:${NC}     ${CYAN}$DEFAULT_PAQET_PORT${NC}"
     echo -e "  ${YELLOW}Default forward ports:${NC}  ${CYAN}$DEFAULT_FORWARD_PORTS${NC}"
+    echo -e "  ${YELLOW}Profile preset:${NC}         ${CYAN}${PROFILE_PRESET_NAME}${NC} (${PROFILE_PRESET_LABEL})"
     echo -e "  ${YELLOW}KCP mode:${NC}               ${CYAN}$DEFAULT_KCP_MODE${NC}"
     echo -e "  ${YELLOW}KCP connections:${NC}        ${CYAN}$DEFAULT_KCP_CONN${NC} (auto-tuned on setup)"
-    echo -e "  ${YELLOW}KCP MTU:${NC}                ${CYAN}$DEFAULT_KCP_MTU${NC} (PaqX-style baseline)"
+    echo -e "  ${YELLOW}KCP MTU:${NC}                ${CYAN}${PROFILE_PRESET_KCP_MTU}${NC} (effective baseline)"
+    echo -e "  ${YELLOW}KCP block:${NC}              ${CYAN}${PROFILE_PRESET_KCP_BLOCK}${NC}"
+    if [ -n "$PROFILE_PRESET_TRANSPORT_TCPBUF" ] || [ -n "$PROFILE_PRESET_TRANSPORT_UDPBUF" ]; then
+        echo -e "  ${YELLOW}tcpbuf/udpbuf:${NC}          ${CYAN}${PROFILE_PRESET_TRANSPORT_TCPBUF:-default}/${PROFILE_PRESET_TRANSPORT_UDPBUF:-default}${NC}"
+    else
+        echo -e "  ${YELLOW}tcpbuf/udpbuf:${NC}          ${CYAN}use paqet defaults${NC}"
+    fi
     echo -e "${MAGENTA}════════════════════════════════════════════════════════════${NC}"
     echo ""
-    echo -e "${CYAN}Setup now applies PaqX-style CPU/RAM auto tuning (conn + wnd) and kernel sysctl optimization.${NC}"
+    echo -e "${CYAN}Setup applies the active profile preset + PaqX-style CPU/RAM auto tuning (conn + wnd) + kernel sysctl optimization.${NC}"
     echo -e "${CYAN}Use Maintenance -> 'd' if you need to lower MTU to 1280 on restrictive networks.${NC}"
     echo ""
 }
@@ -4290,7 +5076,12 @@ main() {
         fi
         local core_ver
         core_ver=$(get_installed_paqet_version_text)
+        local header_core_provider
+        header_core_provider=$(get_current_core_provider)
+        local header_profile_preset
+        header_profile_preset=$(get_current_profile_preset)
         echo -e "${CYAN}[i] paqet core:${NC} ${core_ver}"
+        echo -e "${CYAN}[i] core provider:${NC} $(get_core_provider_label "$header_core_provider") | ${CYAN}profile:${NC} ${header_profile_preset}"
         echo ""
         
         echo -e "${YELLOW}Select option:${NC}"
