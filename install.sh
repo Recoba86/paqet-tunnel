@@ -2814,9 +2814,12 @@ get_current_forward_mappings() {
         }
         in_forward && /protocol:/ {
             line=$0
-            sub(/^.*"/, "", line)
-            sub(/".*$/, "", line)
+            sub(/^.*protocol:[[:space:]]*/, "", line)
+            gsub(/"/, "", line)
+            sub(/[[:space:]]*#.*$/, "", line)
+            gsub(/[[:space:]]/, "", line)
             proto=line
+            if (proto == "") proto="tcp"
             if (listen != "") {
                 if (target == "" || target == listen) spec=listen
                 else spec=listen ":" target
