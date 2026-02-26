@@ -28,6 +28,9 @@ INSTALLER_REPO="Recoba86/paqet-tunnel"
 INSTALLER_CMD="/usr/local/bin/paqet-tunnel"
 CORE_PROVIDER_META="$PAQET_DIR/core-provider.env"
 CORE_PROFILE_META="$PAQET_DIR/core-profile.env"
+CORE_INSTALLED_META="$PAQET_DIR/core-installed.env"
+PAQET_CORE_CACHE_DIR="$PAQET_DIR/core-cache"
+PAQET_CORE_CACHE_ARCHIVE_DIR="$PAQET_CORE_CACHE_DIR/archives"
 DEFAULT_CORE_PROVIDER="official"
 DEFAULT_CORE_PROFILE_PRESET="default"
 DONATE_TON="UQCriHkMUa6h9oN059tyC23T13OsQhGGM3hUS2S4IYRBZgvx"
@@ -151,6 +154,50 @@ set_current_core_provider() {
 CORE_PROVIDER="${provider}"
 UPDATED_AT="$(date -Iseconds 2>/dev/null || date)"
 EOF
+}
+
+get_installed_core_meta_field() {
+    local field="$1"
+    if [ ! -f "$CORE_INSTALLED_META" ]; then
+        echo ""
+        return 0
+    fi
+    grep "^${field}=" "$CORE_INSTALLED_META" 2>/dev/null | head -1 | cut -d'"' -f2
+}
+
+set_installed_core_metadata() {
+    local provider="$1"
+    local version="$2"
+    local archive_name="$3"
+    mkdir -p "$PAQET_DIR"
+    cat > "$CORE_INSTALLED_META" << EOF
+# paqet-tunnel installed core metadata
+CORE_PROVIDER="${provider}"
+CORE_VERSION="${version}"
+CORE_ARCHIVE="${archive_name}"
+UPDATED_AT="$(date -Iseconds 2>/dev/null || date)"
+EOF
+}
+
+sanitize_cache_component() {
+    local value="$1"
+    value=${value//\//_}
+    value=${value// /_}
+    value=${value//:/_}
+    printf '%s\n' "$value"
+}
+
+get_paqet_core_archive_cache_path() {
+    local provider="$1"
+    local version="$2"
+    local archive_name="$3"
+
+    local safe_provider=""
+    local safe_version=""
+    safe_provider=$(sanitize_cache_component "$provider")
+    safe_version=$(sanitize_cache_component "$version")
+
+    printf '%s/%s/%s/%s\n' "$PAQET_CORE_CACHE_ARCHIVE_DIR" "$safe_provider" "$safe_version" "$archive_name"
 }
 
 get_current_profile_preset() {
@@ -1442,6 +1489,8 @@ download_paqet() {
     local version="$PAQET_DL_VERSION"
     local archive_name="$PAQET_DL_ARCHIVE_NAME"
     local download_url="$PAQET_DL_URL"
+    local cache_archive=""
+    cache_archive=$(get_paqet_core_archive_cache_path "$PAQET_DL_PROVIDER" "$version" "$archive_name")
 
     print_info "Core provider: $(get_core_provider_label "$provider")"
     print_info "Downloading version/tag: $version"
@@ -1454,11 +1503,19 @@ download_paqet() {
     # Download and extract
     local temp_archive="/tmp/paqet.tar.gz"
     local download_success=false
+    local archive_source=""
+    local should_cache_archive=false
     
-    if [ -f "$local_archive" ]; then
+    if [ -f "$cache_archive" ]; then
+        print_success "Using cached core archive: $cache_archive"
+        cp "$cache_archive" "$temp_archive"
+        download_success=true
+        archive_source="cache"
+    elif [ -f "$local_archive" ]; then
         print_success "Found local file: $local_archive"
         cp "$local_archive" "$temp_archive"
         download_success=true
+        archive_source="local-exact"
     elif [ -d "$local_dir" ] && [ "$(ls -A $local_dir/*.tar.gz 2>/dev/null)" ]; then
         # Found some tar.gz in /root/paqet, ask user
         print_info "Found archives in $local_dir:"
@@ -1476,12 +1533,14 @@ download_paqet() {
                     local_archive="$user_file"
                     cp "$local_archive" "$temp_archive"
                     download_success=true
+                    archive_source="local-manual"
                     print_success "Using local file: $local_archive"
                     break
                 elif [ -f "$local_dir/$user_file" ]; then
                     local_archive="$local_dir/$user_file"
                     cp "$local_archive" "$temp_archive"
                     download_success=true
+                    archive_source="local-manual"
                     print_success "Using local file: $local_archive"
                     break
                 else
@@ -1496,6 +1555,7 @@ download_paqet() {
         print_info "Attempting download..."
         if timeout 30 curl -fsSL "$download_url" -o "$temp_archive" 2>/dev/null; then
             download_success=true
+            archive_source="download"
             print_success "Download completed"
         else
             print_error "Failed to download paqet binary"
@@ -1513,6 +1573,7 @@ download_paqet() {
                     if [ -f "$local_archive" ]; then
                         cp "$local_archive" "$temp_archive"
                         download_success=true
+                        archive_source="local-manual"
                         print_success "Using local file: $local_archive"
                         break
                     else
@@ -1527,6 +1588,10 @@ download_paqet() {
                 return 1
             fi
         fi
+    fi
+
+    if [ "$download_success" = true ] && [ "$archive_source" != "cache" ]; then
+        should_cache_archive=true
     fi
     
     if [ "$download_success" = true ]; then
@@ -1566,6 +1631,15 @@ download_paqet() {
         if [ -n "$extracted_binary" ] && [ -f "$extracted_binary" ]; then
             mv "$extracted_binary" "$PAQET_BIN"
             chmod +x "$PAQET_BIN"
+            if [ "$should_cache_archive" = true ]; then
+                mkdir -p "$(dirname "$cache_archive")" 2>/dev/null || true
+                if cp "$temp_archive" "$cache_archive" 2>/dev/null; then
+                    print_info "Cached core archive: $cache_archive"
+                else
+                    print_warning "Could not save core archive to cache (continuing)"
+                fi
+            fi
+            set_installed_core_metadata "$PAQET_DL_PROVIDER" "$version" "$archive_name"
             rm -rf "$temp_extract_dir" 2>/dev/null || true
             rm -f "$temp_archive"
             print_success "paqet binary installed successfully"
@@ -4879,6 +4953,15 @@ update_paqet_core() {
     else
         print_warning "Could not fetch latest release tag (network may be restricted)"
     fi
+    local installed_meta_provider=""
+    local installed_meta_version=""
+    installed_meta_provider=$(get_installed_core_meta_field "CORE_PROVIDER")
+    installed_meta_version=$(get_installed_core_meta_field "CORE_VERSION")
+    if [ -n "$latest_tag" ] && [ "$installed_meta_provider" = "$provider" ] && [ "$installed_meta_version" = "$latest_tag" ]; then
+        print_success "Installed core already matches the latest provider release/tag (${latest_tag})."
+        print_info "No download needed. Cached core archives remain available for future switches/rollbacks."
+        return 0
+    fi
     print_warning "Core updates may require updating the peer server too if protocol compatibility changes."
     echo ""
 
@@ -4907,9 +4990,13 @@ update_paqet_core() {
         PAQET_VERSION="$old_version_setting"
         print_error "paqet core update failed"
         if [ -n "$backup_bin" ] && [ -f "$backup_bin" ]; then
-            cp "$backup_bin" "$PAQET_BIN"
-            chmod +x "$PAQET_BIN" 2>/dev/null || true
-            print_warning "Restored previous paqet binary from backup"
+            local tmp_restore="${PAQET_BIN}.restorefail.$$"
+            if cp "$backup_bin" "$tmp_restore" 2>/dev/null && chmod +x "$tmp_restore" 2>/dev/null && mv -f "$tmp_restore" "$PAQET_BIN" 2>/dev/null; then
+                print_warning "Restored previous paqet binary from backup"
+            else
+                rm -f "$tmp_restore" 2>/dev/null || true
+                print_warning "Failed to restore previous paqet binary automatically (manual restore may be required)"
+            fi
         fi
         return 1
     fi
