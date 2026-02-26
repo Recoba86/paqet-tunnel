@@ -59,7 +59,7 @@ print_banner_line() {
 }
 
 print_banner() {
-    clear
+    clear 2>/dev/null || true
     echo -e "${MAGENTA}"
     echo "╔═══════════════════════════════════════════════╗"
     print_banner_line ""
@@ -4471,6 +4471,7 @@ apply_active_profile_preset_existing_configs() {
     fi
     echo ""
     echo -e "${CYAN}Ports and IP addresses are NOT changed. Only profile/tuning settings are updated.${NC}"
+    print_warning "Apply the same transport/KCP profile on BOTH tunnel ends to keep them compatible."
     echo ""
 
     local configs
@@ -4571,7 +4572,7 @@ EOF
 }
 
 list_paqet_core_backups() {
-    find "$PAQET_DIR" -maxdepth 1 -type f \( -name 'paqet.corebak.*' -o -name 'paqet.bak.*' \) 2>/dev/null \
+    find "$PAQET_DIR" -maxdepth 1 -type f \( -name 'paqet.corebak.*' -o -name 'paqet.bak.*' \) ! -name '*.meta' 2>/dev/null \
         | while IFS= read -r f; do
             [ -f "$f" ] || continue
             printf '%s\t%s\n' "$(stat -c %Y "$f" 2>/dev/null || echo 0)" "$f"
@@ -4584,8 +4585,14 @@ restore_paqet_core_backup_file() {
     local backup_file="$1"
     [ -f "$backup_file" ] || { print_error "Backup file not found: $backup_file"; return 1; }
 
-    cp "$backup_file" "$PAQET_BIN" || return 1
-    chmod +x "$PAQET_BIN" 2>/dev/null || true
+    # Avoid "Text file busy" by replacing through a temp file + rename.
+    local tmp_restore="${PAQET_BIN}.restore.$$"
+    cp "$backup_file" "$tmp_restore" || return 1
+    chmod +x "$tmp_restore" 2>/dev/null || true
+    mv -f "$tmp_restore" "$PAQET_BIN" || {
+        rm -f "$tmp_restore" 2>/dev/null || true
+        return 1
+    }
 
     local meta_file="${backup_file}.meta"
     if [ -f "$meta_file" ]; then
@@ -4631,6 +4638,8 @@ switch_paqet_core_provider() {
     echo ""
     echo -e "${CYAN}This replaces only the paqet binary (core). Your configs/services remain the same.${NC}"
     echo -e "${CYAN}A backup of the current binary will be created before switching.${NC}"
+    print_warning "Core protocol compatibility may differ between providers/versions."
+    print_warning "Switch both tunnel ends to compatible cores (or rollback) if connections drop."
     echo ""
 
     read_confirm "Switch core provider now and restart services?" do_switch "y"
@@ -4689,6 +4698,8 @@ set_profile_preset_interactive() {
     echo -e "${CYAN}This only changes the active profile preset metadata for future setups.${NC}"
     echo -e "${CYAN}Use the apply option to retrofit the preset to existing configs.${NC}"
     echo -e "${CYAN}Profile apply keeps ports and IP addresses unchanged (tuning fields only).${NC}"
+    print_warning "KCP profile values (especially block/MTU) should match on BOTH tunnel ends."
+    print_warning "Applying a preset on only one side can cause connection loss until the peer is updated."
     echo ""
 
     read_confirm "Set active profile preset to '${target_preset}'?" do_set "y"
@@ -4868,6 +4879,7 @@ update_paqet_core() {
     else
         print_warning "Could not fetch latest release tag (network may be restricted)"
     fi
+    print_warning "Core updates may require updating the peer server too if protocol compatibility changes."
     echo ""
 
     read_confirm "Download latest core for current provider and restart services?" do_core_update "y"
