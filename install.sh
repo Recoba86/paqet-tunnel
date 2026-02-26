@@ -255,6 +255,65 @@ get_effective_profile_kcp_mtu() {
     echo "$PROFILE_PRESET_KCP_MTU"
 }
 
+profile_preset_is_behzad() {
+    [ "$(get_current_profile_preset)" = "behzad" ]
+}
+
+get_effective_profile_conn_value() {
+    load_active_profile_preset_defaults
+    if [ "$PROFILE_PRESET_NAME" = "behzad" ]; then
+        echo "4"
+    else
+        echo "$AUTO_TUNE_CONN"
+    fi
+}
+
+build_profile_kcp_extra_fragment() {
+    local varname="$1"
+    load_active_profile_preset_defaults
+
+    # Behzad preset intentionally keeps KCP config minimal (mode/key/block/mtu + fixed conn)
+    # and avoids PaqX CPU/RAM window/FEC/smux auto tuning.
+    if [ "$PROFILE_PRESET_NAME" = "behzad" ]; then
+        printf -v "$varname" '%s' ""
+        return 0
+    fi
+
+    local fragment="    nodelay: 1
+    interval: 10
+    resend: 2
+    nocongestion: 1
+    wdelay: false
+    acknodelay: true
+    rcvwnd: ${AUTO_TUNE_RCVWND}
+    sndwnd: ${AUTO_TUNE_SNDWND}
+    smuxbuf: ${AUTO_TUNE_SMUXBUF}
+    streambuf: ${AUTO_TUNE_STREAMBUF}
+    dshard: ${DEFAULT_KCP_DSHARD}
+    pshard: ${DEFAULT_KCP_PSHARD}"
+    printf -v "$varname" '%s' "$fragment"
+}
+
+remove_paqx_kcp_tuning_keys() {
+    local config_file="$1"
+
+    # Remove PaqX-specific KCP tuning keys so non-PaqX presets (e.g., Behzad) stay clean/minimal.
+    sed -i \
+        -e '/^[[:space:]]*nodelay:[[:space:]]*/d' \
+        -e '/^[[:space:]]*interval:[[:space:]]*/d' \
+        -e '/^[[:space:]]*resend:[[:space:]]*/d' \
+        -e '/^[[:space:]]*nocongestion:[[:space:]]*/d' \
+        -e '/^[[:space:]]*wdelay:[[:space:]]*/d' \
+        -e '/^[[:space:]]*acknodelay:[[:space:]]*/d' \
+        -e '/^[[:space:]]*rcvwnd:[[:space:]]*/d' \
+        -e '/^[[:space:]]*sndwnd:[[:space:]]*/d' \
+        -e '/^[[:space:]]*smuxbuf:[[:space:]]*/d' \
+        -e '/^[[:space:]]*streambuf:[[:space:]]*/d' \
+        -e '/^[[:space:]]*dshard:[[:space:]]*/d' \
+        -e '/^[[:space:]]*pshard:[[:space:]]*/d' \
+        "$config_file"
+}
+
 #===============================================================================
 # PaqX-style Auto Tuning (CPU/RAM + kernel sysctl)
 #===============================================================================
@@ -290,6 +349,18 @@ detect_cpu_cores() {
 }
 
 calculate_auto_kcp_profile() {
+    if profile_preset_is_behzad; then
+        # Behzad preset is intentionally fixed and does not use PaqX CPU/RAM auto tuning.
+        AUTO_TUNE_MEM_MB=$(detect_total_mem_mb)
+        AUTO_TUNE_CPU_CORES=$(detect_cpu_cores)
+        AUTO_TUNE_CONN="4"
+        AUTO_TUNE_SNDWND="0"
+        AUTO_TUNE_RCVWND="0"
+        AUTO_TUNE_SMUXBUF="0"
+        AUTO_TUNE_STREAMBUF="0"
+        return 0
+    fi
+
     AUTO_TUNE_MEM_MB=$(detect_total_mem_mb)
     AUTO_TUNE_CPU_CORES=$(detect_cpu_cores)
 
@@ -319,15 +390,23 @@ calculate_auto_kcp_profile() {
 
 show_auto_kcp_profile() {
     load_active_profile_preset_defaults
-    echo -e "${YELLOW}Auto KCP profile (PaqX-style):${NC}"
+    echo -e "${YELLOW}Active KCP Profile Preview:${NC}"
     echo -e "  Profile preset:    ${CYAN}${PROFILE_PRESET_NAME}${NC} (${PROFILE_PRESET_LABEL})"
     echo -e "  CPU cores:        ${CYAN}${AUTO_TUNE_CPU_CORES}${NC}"
     echo -e "  RAM:              ${CYAN}${AUTO_TUNE_MEM_MB} MB${NC}"
     echo -e "  KCP mode:         ${CYAN}${DEFAULT_KCP_MODE}${NC}"
-    echo -e "  KCP conn:         ${CYAN}${AUTO_TUNE_CONN}${NC}"
+    if [ "$PROFILE_PRESET_NAME" = "behzad" ]; then
+        echo -e "  KCP conn:         ${CYAN}4${NC} (Behzad fixed preset)"
+    else
+        echo -e "  KCP conn:         ${CYAN}${AUTO_TUNE_CONN}${NC} (PaqX CPU/RAM auto-tune)"
+    fi
     echo -e "  KCP mtu:          ${CYAN}${PROFILE_PRESET_KCP_MTU}${NC}"
     echo -e "  KCP block:        ${CYAN}${PROFILE_PRESET_KCP_BLOCK}${NC}"
-    echo -e "  KCP rcvwnd/sndwnd ${CYAN}${AUTO_TUNE_RCVWND}/${AUTO_TUNE_SNDWND}${NC}"
+    if [ "$PROFILE_PRESET_NAME" = "behzad" ]; then
+        echo -e "  KCP rcvwnd/sndwnd ${CYAN}paqet core defaults (not forced)${NC}"
+    else
+        echo -e "  KCP rcvwnd/sndwnd ${CYAN}${AUTO_TUNE_RCVWND}/${AUTO_TUNE_SNDWND}${NC}"
+    fi
     echo ""
 }
 
@@ -1887,10 +1966,14 @@ setup_server_b() {
 
     local profile_network_pcap_fragment=""
     local profile_transport_buf_fragment=""
+    local profile_kcp_extra_fragment=""
+    local profile_conn_value=""
     local profile_kcp_block=""
     local profile_kcp_mtu=""
     build_profile_network_pcap_fragment "server" profile_network_pcap_fragment
     build_profile_transport_buffer_fragment profile_transport_buf_fragment
+    build_profile_kcp_extra_fragment profile_kcp_extra_fragment
+    profile_conn_value=$(get_effective_profile_conn_value)
     profile_kcp_block=$(get_effective_profile_kcp_block)
     profile_kcp_mtu=$(get_effective_profile_kcp_mtu)
     
@@ -1916,24 +1999,13 @@ ${profile_network_pcap_fragment}
 
 transport:
   protocol: "kcp"${profile_transport_buf_fragment}
-  conn: ${AUTO_TUNE_CONN}
+  conn: ${profile_conn_value}
   kcp:
     mode: "${DEFAULT_KCP_MODE}"
-    nodelay: 1
-    interval: 10
-    resend: 2
-    nocongestion: 1
-    wdelay: false
-    acknodelay: true
     key: "${secret_key}"
     mtu: ${profile_kcp_mtu}
-    rcvwnd: ${AUTO_TUNE_RCVWND}
-    sndwnd: ${AUTO_TUNE_SNDWND}
     block: "${profile_kcp_block}"
-    smuxbuf: ${AUTO_TUNE_SMUXBUF}
-    streambuf: ${AUTO_TUNE_STREAMBUF}
-    dshard: ${DEFAULT_KCP_DSHARD}
-    pshard: ${DEFAULT_KCP_PSHARD}
+${profile_kcp_extra_fragment}
 EOF
     
     print_success "Configuration created"
@@ -2132,10 +2204,14 @@ setup_server_a() {
 
     local profile_network_pcap_fragment=""
     local profile_transport_buf_fragment=""
+    local profile_kcp_extra_fragment=""
+    local profile_conn_value=""
     local profile_kcp_block=""
     local profile_kcp_mtu=""
     build_profile_network_pcap_fragment "client" profile_network_pcap_fragment
     build_profile_transport_buffer_fragment profile_transport_buf_fragment
+    build_profile_kcp_extra_fragment profile_kcp_extra_fragment
+    profile_conn_value=$(get_effective_profile_conn_value)
     profile_kcp_block=$(get_effective_profile_kcp_block)
     profile_kcp_mtu=$(get_effective_profile_kcp_mtu)
     
@@ -2166,24 +2242,13 @@ server:
 
 transport:
   protocol: "kcp"${profile_transport_buf_fragment}
-  conn: ${AUTO_TUNE_CONN}
+  conn: ${profile_conn_value}
   kcp:
     mode: "${DEFAULT_KCP_MODE}"
-    nodelay: 1
-    interval: 10
-    resend: 2
-    nocongestion: 1
-    wdelay: false
-    acknodelay: true
     key: "${SECRET_KEY}"
     mtu: ${profile_kcp_mtu}
-    rcvwnd: ${AUTO_TUNE_RCVWND}
-    sndwnd: ${AUTO_TUNE_SNDWND}
     block: "${profile_kcp_block}"
-    smuxbuf: ${AUTO_TUNE_SMUXBUF}
-    streambuf: ${AUTO_TUNE_STREAMBUF}
-    dshard: ${DEFAULT_KCP_DSHARD}
-    pshard: ${DEFAULT_KCP_PSHARD}
+${profile_kcp_extra_fragment}
 EOF
     
     print_success "Configuration created: $PAQET_CONFIG"
@@ -4090,6 +4155,13 @@ apply_auto_tune_to_config_file() {
 
     load_active_profile_preset_defaults
 
+    # If Behzad preset is active, keep this path aligned with the active preset model
+    # (fixed profile, no PaqX CPU/RAM auto KCP tuning fields).
+    if [ "$PROFILE_PRESET_NAME" = "behzad" ]; then
+        apply_profile_preset_to_config_file "$config_file" "behzad"
+        return $?
+    fi
+
     upsert_transport_conn_value "$config_file" "$AUTO_TUNE_CONN"
 
     upsert_kcp_scalar_value "$config_file" "mode" "$DEFAULT_KCP_MODE" "quoted"
@@ -4127,6 +4199,11 @@ apply_auto_tune_existing_configs() {
 
     calculate_auto_kcp_profile
     show_auto_kcp_profile
+
+    if [ "$(get_current_profile_preset)" = "behzad" ]; then
+        print_warning "Active preset is 'behzad': this action will apply the Behzad standalone KCP profile (not PaqX CPU/RAM tuning)."
+        echo ""
+    fi
 
     echo -e "${YELLOW}This will update existing KCP settings on this server:${NC}"
     echo -e "  - conn / mode / mtu"
@@ -4299,6 +4376,30 @@ apply_profile_preset_to_config_file() {
 
     load_active_profile_preset_defaults "$preset"
 
+    # Profile switch is intentionally limited to tuning-related sections only.
+    # It does NOT touch forward ports, tunnel/server ports, server IPs, or bind IPs.
+    upsert_kcp_scalar_value "$config_file" "mode" "$DEFAULT_KCP_MODE" "quoted"
+
+    if [ "$PROFILE_PRESET_NAME" = "behzad" ]; then
+        upsert_transport_conn_value "$config_file" "$(get_effective_profile_conn_value)"
+        remove_paqx_kcp_tuning_keys "$config_file"
+    else
+        calculate_auto_kcp_profile
+        upsert_transport_conn_value "$config_file" "$(get_effective_profile_conn_value)"
+        upsert_kcp_scalar_value "$config_file" "nodelay" "1" "bare"
+        upsert_kcp_scalar_value "$config_file" "interval" "10" "bare"
+        upsert_kcp_scalar_value "$config_file" "resend" "2" "bare"
+        upsert_kcp_scalar_value "$config_file" "nocongestion" "1" "bare"
+        upsert_kcp_scalar_value "$config_file" "wdelay" "false" "bare"
+        upsert_kcp_scalar_value "$config_file" "acknodelay" "true" "bare"
+        upsert_kcp_scalar_value "$config_file" "rcvwnd" "$AUTO_TUNE_RCVWND" "bare"
+        upsert_kcp_scalar_value "$config_file" "sndwnd" "$AUTO_TUNE_SNDWND" "bare"
+        upsert_kcp_scalar_value "$config_file" "smuxbuf" "$AUTO_TUNE_SMUXBUF" "bare"
+        upsert_kcp_scalar_value "$config_file" "streambuf" "$AUTO_TUNE_STREAMBUF" "bare"
+        upsert_kcp_scalar_value "$config_file" "dshard" "$DEFAULT_KCP_DSHARD" "bare"
+        upsert_kcp_scalar_value "$config_file" "pshard" "$DEFAULT_KCP_PSHARD" "bare"
+    fi
+
     upsert_kcp_scalar_value "$config_file" "block" "$PROFILE_PRESET_KCP_BLOCK" "quoted"
     upsert_kcp_scalar_value "$config_file" "mtu" "$PROFILE_PRESET_KCP_MTU" "bare"
 
@@ -4323,6 +4424,7 @@ apply_profile_preset_to_config_file() {
         pcap_sockbuf="$PROFILE_PRESET_PCAP_SOCKBUF_CLIENT"
     fi
     upsert_or_remove_network_pcap_sockbuf "$config_file" "$pcap_sockbuf"
+    remove_legacy_kcp_alias_keys "$config_file"
 
     return 0
 }
@@ -4349,8 +4451,14 @@ apply_active_profile_preset_existing_configs() {
     else
         echo -e "    - network.pcap.sockbuf: ${CYAN}removed (use paqet defaults)${NC}"
     fi
+    if [ "$PROFILE_PRESET_NAME" = "behzad" ]; then
+        echo -e "    - KCP conn: ${CYAN}fixed Behzad preset (4)${NC}"
+        echo -e "    - PaqX KCP auto-tune fields: ${CYAN}removed (no mixing)${NC}"
+    else
+        echo -e "    - KCP conn/windows/FEC/smux: ${CYAN}PaqX CPU/RAM auto-tune${NC}"
+    fi
     echo ""
-    echo -e "${CYAN}This does NOT change CPU/RAM PaqX auto-tune windows/conn unless you run option k.${NC}"
+    echo -e "${CYAN}Ports and IP addresses are NOT changed. Only profile/tuning settings are updated.${NC}"
     echo ""
 
     local configs
@@ -4568,6 +4676,7 @@ set_profile_preset_interactive() {
     echo ""
     echo -e "${CYAN}This only changes the active profile preset metadata for future setups.${NC}"
     echo -e "${CYAN}Use the apply option to retrofit the preset to existing configs.${NC}"
+    echo -e "${CYAN}Profile apply keeps ports and IP addresses unchanged (tuning fields only).${NC}"
     echo ""
 
     read_confirm "Set active profile preset to '${target_preset}'?" do_set "y"
@@ -4959,7 +5068,11 @@ show_port_config() {
     echo -e "  ${YELLOW}Default forward ports:${NC}  ${CYAN}$DEFAULT_FORWARD_PORTS${NC}"
     echo -e "  ${YELLOW}Profile preset:${NC}         ${CYAN}${PROFILE_PRESET_NAME}${NC} (${PROFILE_PRESET_LABEL})"
     echo -e "  ${YELLOW}KCP mode:${NC}               ${CYAN}$DEFAULT_KCP_MODE${NC}"
-    echo -e "  ${YELLOW}KCP connections:${NC}        ${CYAN}$DEFAULT_KCP_CONN${NC} (auto-tuned on setup)"
+    if [ "$PROFILE_PRESET_NAME" = "behzad" ]; then
+        echo -e "  ${YELLOW}KCP connections:${NC}        ${CYAN}4${NC} (Behzad preset fixed value)"
+    else
+        echo -e "  ${YELLOW}KCP connections:${NC}        ${CYAN}$DEFAULT_KCP_CONN${NC} (PaqX CPU/RAM auto-tuned on setup)"
+    fi
     echo -e "  ${YELLOW}KCP MTU:${NC}                ${CYAN}${PROFILE_PRESET_KCP_MTU}${NC} (effective baseline)"
     echo -e "  ${YELLOW}KCP block:${NC}              ${CYAN}${PROFILE_PRESET_KCP_BLOCK}${NC}"
     if [ -n "$PROFILE_PRESET_TRANSPORT_TCPBUF" ] || [ -n "$PROFILE_PRESET_TRANSPORT_UDPBUF" ]; then
@@ -4969,7 +5082,11 @@ show_port_config() {
     fi
     echo -e "${MAGENTA}════════════════════════════════════════════════════════════${NC}"
     echo ""
-    echo -e "${CYAN}Setup applies the active profile preset + PaqX-style CPU/RAM auto tuning (conn + wnd) + kernel sysctl optimization.${NC}"
+    if [ "$PROFILE_PRESET_NAME" = "behzad" ]; then
+        echo -e "${CYAN}Setup applies the active Behzad preset as a standalone profile (no PaqX KCP auto-tune mixing) + kernel sysctl optimization.${NC}"
+    else
+        echo -e "${CYAN}Setup applies the active profile preset + PaqX-style CPU/RAM auto tuning (conn + wnd) + kernel sysctl optimization.${NC}"
+    fi
     echo -e "${CYAN}Use Maintenance -> 'd' if you need to lower MTU to 1280 on restrictive networks.${NC}"
     echo ""
 }
