@@ -302,7 +302,20 @@ get_effective_profile_kcp_block() {
 
 get_effective_profile_kcp_mtu() {
     load_active_profile_preset_defaults
+    if [ "$PROFILE_PRESET_NAME" != "behzad" ] && [ -n "$AUTO_TUNE_KCP_MTU" ]; then
+        echo "$AUTO_TUNE_KCP_MTU"
+        return 0
+    fi
     echo "$PROFILE_PRESET_KCP_MTU"
+}
+
+get_effective_profile_kcp_mode() {
+    load_active_profile_preset_defaults
+    if [ "$PROFILE_PRESET_NAME" != "behzad" ] && [ -n "$AUTO_TUNE_KCP_MODE" ]; then
+        echo "$AUTO_TUNE_KCP_MODE"
+        return 0
+    fi
+    echo "$DEFAULT_KCP_MODE"
 }
 
 profile_preset_is_behzad() {
@@ -370,11 +383,14 @@ remove_paqx_kcp_tuning_keys() {
 
 AUTO_TUNE_CPU_CORES="1"
 AUTO_TUNE_MEM_MB="0"
+AUTO_TUNE_HW_CLASS="unknown"
 AUTO_TUNE_CONN="$DEFAULT_KCP_CONN"
 AUTO_TUNE_SNDWND="1024"
 AUTO_TUNE_RCVWND="1024"
 AUTO_TUNE_SMUXBUF="4194304"
 AUTO_TUNE_STREAMBUF="2097152"
+AUTO_TUNE_KCP_MODE="$DEFAULT_KCP_MODE"
+AUTO_TUNE_KCP_MTU="$DEFAULT_KCP_MTU"
 
 detect_total_mem_mb() {
     local total_mem=""
@@ -398,16 +414,53 @@ detect_cpu_cores() {
     echo "$cpu_cores"
 }
 
+classify_server_hardware() {
+    local mem_mb="${1:-0}"
+    local cpu_cores="${2:-1}"
+
+    if [ "$cpu_cores" -le 1 ] || [ "$mem_mb" -le 1024 ]; then
+        echo "low"
+    elif [ "$cpu_cores" -le 2 ] || [ "$mem_mb" -le 4096 ]; then
+        echo "mid"
+    else
+        echo "high"
+    fi
+}
+
+calculate_minimal_preset_adaptive_conn() {
+    local mem_mb="${1:-0}"
+    local cpu_cores="${2:-1}"
+
+    # Minimal presets (e.g., Behzad) still need hardware-aware concurrency.
+    # Weak VPSes choke under burst traffic with conn=4.
+    if [ "$cpu_cores" -le 1 ] || [ "$mem_mb" -le 1536 ]; then
+        echo "1"
+    elif [ "$cpu_cores" -le 2 ] || [ "$mem_mb" -le 4096 ]; then
+        echo "2"
+    else
+        echo "4"
+    fi
+}
+
+calculate_behzad_minimal_kcp_profile() {
+    AUTO_TUNE_MEM_MB=$(detect_total_mem_mb)
+    AUTO_TUNE_CPU_CORES=$(detect_cpu_cores)
+    AUTO_TUNE_HW_CLASS=$(classify_server_hardware "$AUTO_TUNE_MEM_MB" "$AUTO_TUNE_CPU_CORES")
+
+    AUTO_TUNE_CONN=$(calculate_minimal_preset_adaptive_conn "$AUTO_TUNE_MEM_MB" "$AUTO_TUNE_CPU_CORES")
+    AUTO_TUNE_SNDWND="0"
+    AUTO_TUNE_RCVWND="0"
+    AUTO_TUNE_SMUXBUF="0"
+    AUTO_TUNE_STREAMBUF="0"
+    AUTO_TUNE_KCP_MODE="$DEFAULT_KCP_MODE"
+    AUTO_TUNE_KCP_MTU="1150"
+}
+
 calculate_auto_kcp_profile() {
     if profile_preset_is_behzad; then
-        # Behzad preset is intentionally fixed and does not use PaqX CPU/RAM auto tuning.
-        AUTO_TUNE_MEM_MB=$(detect_total_mem_mb)
-        AUTO_TUNE_CPU_CORES=$(detect_cpu_cores)
-        AUTO_TUNE_CONN="4"
-        AUTO_TUNE_SNDWND="0"
-        AUTO_TUNE_RCVWND="0"
-        AUTO_TUNE_SMUXBUF="0"
-        AUTO_TUNE_STREAMBUF="0"
+        # Behzad preset stays minimal/no-mixing, but conn should still be
+        # hardware-aware so weak VPSes don't get overloaded.
+        calculate_behzad_minimal_kcp_profile
         return 0
     fi
 
@@ -417,28 +470,52 @@ calculate_auto_kcp_profile() {
 calculate_paqx_auto_kcp_profile() {
     AUTO_TUNE_MEM_MB=$(detect_total_mem_mb)
     AUTO_TUNE_CPU_CORES=$(detect_cpu_cores)
+    AUTO_TUNE_HW_CLASS=$(classify_server_hardware "$AUTO_TUNE_MEM_MB" "$AUTO_TUNE_CPU_CORES")
 
-    # PaqX server auto-tuning thresholds
+    # Hardware-aware defaults (favor stability on low-end VPS, throughput on larger boxes).
     AUTO_TUNE_CONN="$DEFAULT_KCP_CONN"
     AUTO_TUNE_SNDWND="1024"
     AUTO_TUNE_RCVWND="1024"
     AUTO_TUNE_SMUXBUF="4194304"
     AUTO_TUNE_STREAMBUF="2097152"
+    AUTO_TUNE_KCP_MODE="$DEFAULT_KCP_MODE"
+    AUTO_TUNE_KCP_MTU="$DEFAULT_KCP_MTU"
 
-    if [ "$AUTO_TUNE_MEM_MB" -gt 4000 ]; then
-        AUTO_TUNE_SNDWND="4096"
-        AUTO_TUNE_RCVWND="4096"
-    elif [ "$AUTO_TUNE_MEM_MB" -gt 1000 ]; then
+    if [ "$AUTO_TUNE_CPU_CORES" -le 1 ] || [ "$AUTO_TUNE_MEM_MB" -le 1024 ]; then
+        # Low-end VPS profile: favor stability under burst traffic while keeping
+        # usable throughput. This matches the live-tested behavior on 1c/1GB nodes.
+        AUTO_TUNE_CONN="2"
+        AUTO_TUNE_SNDWND="1024"
+        AUTO_TUNE_RCVWND="1024"
+        AUTO_TUNE_SMUXBUF="4194304"
+        AUTO_TUNE_STREAMBUF="2097152"
+        AUTO_TUNE_KCP_MODE="normal"
+        AUTO_TUNE_KCP_MTU="1200"
+
+        if [ "$AUTO_TUNE_MEM_MB" -le 768 ]; then
+            AUTO_TUNE_CONN="1"
+            AUTO_TUNE_SNDWND="256"
+            AUTO_TUNE_RCVWND="256"
+            AUTO_TUNE_SMUXBUF="1048576"
+            AUTO_TUNE_STREAMBUF="524288"
+            AUTO_TUNE_KCP_MTU="1150"
+        fi
+    elif [ "$AUTO_TUNE_CPU_CORES" -le 2 ] || [ "$AUTO_TUNE_MEM_MB" -le 4096 ]; then
+        AUTO_TUNE_CONN="2"
         AUTO_TUNE_SNDWND="2048"
         AUTO_TUNE_RCVWND="2048"
-    fi
-
-    if [ "$AUTO_TUNE_CPU_CORES" -ge 4 ]; then
-        AUTO_TUNE_CONN="4"
-    elif [ "$AUTO_TUNE_CPU_CORES" -ge 2 ]; then
-        AUTO_TUNE_CONN="2"
+        AUTO_TUNE_SMUXBUF="4194304"
+        AUTO_TUNE_STREAMBUF="2097152"
+        AUTO_TUNE_KCP_MODE="fast"
+        AUTO_TUNE_KCP_MTU="1250"
     else
-        AUTO_TUNE_CONN="$DEFAULT_KCP_CONN"
+        AUTO_TUNE_CONN="4"
+        AUTO_TUNE_SNDWND="4096"
+        AUTO_TUNE_RCVWND="4096"
+        AUTO_TUNE_SMUXBUF="4194304"
+        AUTO_TUNE_STREAMBUF="2097152"
+        AUTO_TUNE_KCP_MODE="fast"
+        AUTO_TUNE_KCP_MTU="$DEFAULT_KCP_MTU"
     fi
 
     return 0
@@ -450,13 +527,22 @@ show_auto_kcp_profile() {
     echo -e "  Profile preset:    ${CYAN}${PROFILE_PRESET_NAME}${NC} (${PROFILE_PRESET_LABEL})"
     echo -e "  CPU cores:        ${CYAN}${AUTO_TUNE_CPU_CORES}${NC}"
     echo -e "  RAM:              ${CYAN}${AUTO_TUNE_MEM_MB} MB${NC}"
-    echo -e "  KCP mode:         ${CYAN}${DEFAULT_KCP_MODE}${NC}"
+    echo -e "  HW class:         ${CYAN}${AUTO_TUNE_HW_CLASS}${NC}"
     if [ "$PROFILE_PRESET_NAME" = "behzad" ]; then
-        echo -e "  KCP conn:         ${CYAN}4${NC} (Behzad fixed preset)"
+        echo -e "  KCP mode:         ${CYAN}${DEFAULT_KCP_MODE}${NC}"
+    else
+        echo -e "  KCP mode:         ${CYAN}${AUTO_TUNE_KCP_MODE:-$DEFAULT_KCP_MODE}${NC}"
+    fi
+    if [ "$PROFILE_PRESET_NAME" = "behzad" ]; then
+        echo -e "  KCP conn:         ${CYAN}${AUTO_TUNE_CONN}${NC} (Behzad minimal + hardware-adaptive)"
     else
         echo -e "  KCP conn:         ${CYAN}${AUTO_TUNE_CONN}${NC} (PaqX CPU/RAM auto-tune)"
     fi
-    echo -e "  KCP mtu:          ${CYAN}${PROFILE_PRESET_KCP_MTU}${NC}"
+    if [ "$PROFILE_PRESET_NAME" = "behzad" ]; then
+        echo -e "  KCP mtu:          ${CYAN}${PROFILE_PRESET_KCP_MTU}${NC}"
+    else
+        echo -e "  KCP mtu:          ${CYAN}${AUTO_TUNE_KCP_MTU:-$PROFILE_PRESET_KCP_MTU}${NC}"
+    fi
     echo -e "  KCP block:        ${CYAN}${PROFILE_PRESET_KCP_BLOCK}${NC}"
     if [ "$PROFILE_PRESET_NAME" = "behzad" ]; then
         echo -e "  KCP rcvwnd/sndwnd ${CYAN}paqet core defaults (not forced)${NC}"
@@ -481,6 +567,12 @@ apply_paqx_kernel_optimizations() {
     local udp_mem_triplet="32768 49152 65536"
     local udp_min="16384"
     local optmem_max="8388608"
+    local netdev_budget="300"
+    local netdev_budget_usecs="2000"
+    local tcp_limit_output_bytes="1048576"
+    local tcp_notsent_lowat="4294967295"
+    local fq_limit="10000"
+    local fq_flow_limit="100"
 
     if [ "$mem_mb" -ge 4096 ]; then
         netdev_backlog="250000"
@@ -490,6 +582,12 @@ apply_paqx_kernel_optimizations() {
         udp_mem_triplet="90219 120292 180438"
         udp_min="65536"
         optmem_max="25165824"
+        netdev_budget="800"
+        netdev_budget_usecs="8000"
+        tcp_limit_output_bytes="1048576"
+        tcp_notsent_lowat="262144"
+        fq_limit="50000"
+        fq_flow_limit="1000"
     elif [ "$mem_mb" -ge 2048 ]; then
         netdev_backlog="131072"
         sock_max="67108864"
@@ -498,6 +596,20 @@ apply_paqx_kernel_optimizations() {
         udp_mem_triplet="65536 98304 131072"
         udp_min="65536"
         optmem_max="16777216"
+        netdev_budget="700"
+        netdev_budget_usecs="8000"
+        tcp_limit_output_bytes="524288"
+        tcp_notsent_lowat="131072"
+        fq_limit="50000"
+        fq_flow_limit="1000"
+    else
+        # Small VPS burst-smoothing defaults (validated on 1c/1GB nodes).
+        netdev_budget="600"
+        netdev_budget_usecs="8000"
+        tcp_limit_output_bytes="262144"
+        tcp_notsent_lowat="65536"
+        fq_limit="50000"
+        fq_flow_limit="1000"
     fi
 
     mkdir -p /etc/sysctl.d
@@ -515,6 +627,10 @@ net.core.rmem_default=${sock_default}
 net.core.wmem_default=${sock_default}
 net.ipv4.tcp_rmem=4096 87380 ${tcp_buf_max}
 net.ipv4.tcp_wmem=4096 65536 ${tcp_buf_max}
+net.core.netdev_budget=${netdev_budget}
+net.core.netdev_budget_usecs=${netdev_budget_usecs}
+net.ipv4.tcp_limit_output_bytes=${tcp_limit_output_bytes}
+net.ipv4.tcp_notsent_lowat=${tcp_notsent_lowat}
 net.ipv4.udp_mem=${udp_mem_triplet}
 net.ipv4.udp_rmem_min=${udp_min}
 net.ipv4.udp_wmem_min=${udp_min}
@@ -525,6 +641,18 @@ EOF
         print_info "Kernel burst profile: RAM=${mem_mb}MB backlog=${netdev_backlog} sockmax=${sock_max} udp_mem='${udp_mem_triplet}'"
     else
         print_warning "sysctl reload reported an issue (file was still written to $OPTIMIZE_SYSCTL_FILE)"
+    fi
+
+    if command -v tc >/dev/null 2>&1; then
+        local qdisc_if=""
+        qdisc_if=$(get_default_interface 2>/dev/null || true)
+        if [ -n "$qdisc_if" ]; then
+            if tc qdisc replace dev "$qdisc_if" root fq limit "${fq_limit}" flow_limit "${fq_flow_limit}" >/dev/null 2>&1; then
+                print_info "Applied fq burst queue tuning on ${qdisc_if} (limit=${fq_limit}, flow_limit=${fq_flow_limit})"
+            else
+                print_warning "Could not apply fq burst queue tuning on ${qdisc_if} (tc qdisc replace failed)"
+            fi
+        fi
     fi
 }
 
@@ -2092,12 +2220,14 @@ setup_server_b() {
     local profile_conn_value=""
     local profile_kcp_block=""
     local profile_kcp_mtu=""
+    local profile_kcp_mode=""
     build_profile_network_pcap_fragment "server" profile_network_pcap_fragment
     build_profile_transport_buffer_fragment profile_transport_buf_fragment
     build_profile_kcp_extra_fragment profile_kcp_extra_fragment
     profile_conn_value=$(get_effective_profile_conn_value)
     profile_kcp_block=$(get_effective_profile_kcp_block)
     profile_kcp_mtu=$(get_effective_profile_kcp_mtu)
+    profile_kcp_mode=$(get_effective_profile_kcp_mode)
     
     cat > "$PAQET_CONFIG" << EOF
 # paqet Server Configuration
@@ -2123,7 +2253,7 @@ transport:
   protocol: "kcp"${profile_transport_buf_fragment}
   conn: ${profile_conn_value}
   kcp:
-    mode: "${DEFAULT_KCP_MODE}"
+    mode: "${profile_kcp_mode}"
     key: "${secret_key}"
     mtu: ${profile_kcp_mtu}
     block: "${profile_kcp_block}"
@@ -2330,12 +2460,14 @@ setup_server_a() {
     local profile_conn_value=""
     local profile_kcp_block=""
     local profile_kcp_mtu=""
+    local profile_kcp_mode=""
     build_profile_network_pcap_fragment "client" profile_network_pcap_fragment
     build_profile_transport_buffer_fragment profile_transport_buf_fragment
     build_profile_kcp_extra_fragment profile_kcp_extra_fragment
     profile_conn_value=$(get_effective_profile_conn_value)
     profile_kcp_block=$(get_effective_profile_kcp_block)
     profile_kcp_mtu=$(get_effective_profile_kcp_mtu)
+    profile_kcp_mode=$(get_effective_profile_kcp_mode)
     
     cat > "$PAQET_CONFIG" << EOF
 # paqet Client Configuration (Port Forwarding Mode)
@@ -2366,7 +2498,7 @@ transport:
   protocol: "kcp"${profile_transport_buf_fragment}
   conn: ${profile_conn_value}
   kcp:
-    mode: "${DEFAULT_KCP_MODE}"
+    mode: "${profile_kcp_mode}"
     key: "${SECRET_KEY}"
     mtu: ${profile_kcp_mtu}
     block: "${profile_kcp_block}"
@@ -4504,7 +4636,8 @@ apply_profile_preset_to_config_file() {
 
     # Profile switch is intentionally limited to tuning-related sections only.
     # It does NOT touch forward ports, tunnel/server ports, server IPs, or bind IPs.
-    upsert_kcp_scalar_value "$config_file" "mode" "$DEFAULT_KCP_MODE" "quoted"
+    local effective_kcp_mode="$DEFAULT_KCP_MODE"
+    local effective_kcp_mtu="$PROFILE_PRESET_KCP_MTU"
 
     if [ "$PROFILE_PRESET_NAME" = "behzad" ]; then
         upsert_transport_conn_value "$config_file" "4"
@@ -4513,6 +4646,8 @@ apply_profile_preset_to_config_file() {
         # Apply the PaqX auto-tune profile deterministically for the default preset,
         # even if the current active preset was changed just before this call.
         calculate_paqx_auto_kcp_profile
+        [ -n "$AUTO_TUNE_KCP_MODE" ] && effective_kcp_mode="$AUTO_TUNE_KCP_MODE"
+        [ -n "$AUTO_TUNE_KCP_MTU" ] && effective_kcp_mtu="$AUTO_TUNE_KCP_MTU"
         upsert_transport_conn_value "$config_file" "$AUTO_TUNE_CONN"
         upsert_kcp_scalar_value "$config_file" "nodelay" "1" "bare"
         upsert_kcp_scalar_value "$config_file" "interval" "10" "bare"
@@ -4528,8 +4663,10 @@ apply_profile_preset_to_config_file() {
         upsert_kcp_scalar_value "$config_file" "pshard" "$DEFAULT_KCP_PSHARD" "bare"
     fi
 
+    upsert_kcp_scalar_value "$config_file" "mode" "$effective_kcp_mode" "quoted"
+
     upsert_kcp_scalar_value "$config_file" "block" "$PROFILE_PRESET_KCP_BLOCK" "quoted"
-    upsert_kcp_scalar_value "$config_file" "mtu" "$PROFILE_PRESET_KCP_MTU" "bare"
+    upsert_kcp_scalar_value "$config_file" "mtu" "$effective_kcp_mtu" "bare"
 
     if [ -n "$PROFILE_PRESET_TRANSPORT_TCPBUF" ]; then
         upsert_transport_scalar_value "$config_file" "tcpbuf" "$PROFILE_PRESET_TRANSPORT_TCPBUF"
@@ -5219,6 +5356,7 @@ view_current_auto_profile() {
 
 show_port_config() {
     load_active_profile_preset_defaults
+    calculate_auto_kcp_profile
     echo ""
     echo -e "${MAGENTA}════════════════════════════════════════════════════════════${NC}"
     echo -e "${MAGENTA}              Current Port Configuration                    ${NC}"
@@ -5226,13 +5364,13 @@ show_port_config() {
     echo -e "  ${YELLOW}Default paqet port:${NC}     ${CYAN}$DEFAULT_PAQET_PORT${NC}"
     echo -e "  ${YELLOW}Default forward ports:${NC}  ${CYAN}$DEFAULT_FORWARD_PORTS${NC}"
     echo -e "  ${YELLOW}Profile preset:${NC}         ${CYAN}${PROFILE_PRESET_NAME}${NC} (${PROFILE_PRESET_LABEL})"
-    echo -e "  ${YELLOW}KCP mode:${NC}               ${CYAN}$DEFAULT_KCP_MODE${NC}"
+    echo -e "  ${YELLOW}KCP mode:${NC}               ${CYAN}$(get_effective_profile_kcp_mode)${NC}"
     if [ "$PROFILE_PRESET_NAME" = "behzad" ]; then
         echo -e "  ${YELLOW}KCP connections:${NC}        ${CYAN}4${NC} (Behzad preset fixed value)"
     else
-        echo -e "  ${YELLOW}KCP connections:${NC}        ${CYAN}$DEFAULT_KCP_CONN${NC} (PaqX CPU/RAM auto-tuned on setup)"
+        echo -e "  ${YELLOW}KCP connections:${NC}        ${CYAN}$AUTO_TUNE_CONN${NC} (PaqX CPU/RAM auto-tuned for this server)"
     fi
-    echo -e "  ${YELLOW}KCP MTU:${NC}                ${CYAN}${PROFILE_PRESET_KCP_MTU}${NC} (effective baseline)"
+    echo -e "  ${YELLOW}KCP MTU:${NC}                ${CYAN}$(get_effective_profile_kcp_mtu)${NC} (effective baseline)"
     echo -e "  ${YELLOW}KCP block:${NC}              ${CYAN}${PROFILE_PRESET_KCP_BLOCK}${NC}"
     if [ -n "$PROFILE_PRESET_TRANSPORT_TCPBUF" ] || [ -n "$PROFILE_PRESET_TRANSPORT_UDPBUF" ]; then
         echo -e "  ${YELLOW}tcpbuf/udpbuf:${NC}          ${CYAN}${PROFILE_PRESET_TRANSPORT_TCPBUF:-default}/${PROFILE_PRESET_TRANSPORT_UDPBUF:-default}${NC}"
